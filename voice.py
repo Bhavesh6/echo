@@ -419,6 +419,14 @@ class Listener:
                     self._ready = np.concatenate(self._utt)
                 self._utt = []
 
+    def restart_utterance(self):
+        """Throw away whatever has been captured so far and begin again from
+        the pre-roll. Called when the wake phrase fires, so anything said
+        before being addressed does not end up in the request."""
+        with self._ulock:
+            self._ready = None
+        self._utt = list(self._pre)
+
     def take_utterance(self):
         """The audio of the last completed utterance, once, or None."""
         with self._ulock:
@@ -437,7 +445,11 @@ class Listener:
 # only physical safety outranked hearing its name. Without it a companion
 # reacts to the television, to other people, to you muttering at your desk.
 WAKE_PHRASE = "hey_jarvis"   # also: alexa, hey_mycroft, hey_rhasspy
-WAKE_THRESHOLD = 0.5         # 0..1. Lower = easier to trigger, more false ones
+WAKE_THRESHOLD = 0.28        # 0..1. Measured on real recordings from this
+                             # mic: a clear 'hey jarvis' scores 0.92, one run
+                             # into the next words scores 0.36, and ordinary
+                             # speech scores 0.001. 0.5 missed the second; at
+                             # 0.28 both fire with a 250x margin over noise.
 WAKE_FRAME = 1280            # samples openWakeWord expects (80 ms at 16 kHz)
 WAKE_COOLDOWN = 2.0          # seconds before it can fire again
 
@@ -458,7 +470,10 @@ class WakeWord:
         self._pending = False
         self._last = 0.0
         self._buf = np.zeros(0, dtype=np.float32)
-        self._q = queue.Queue(maxsize=64)
+        # ~4 s of audio. The worker runs about 15x faster than realtime so
+        # it should never fill, but dropping is still better than blocking
+        # the audio callback if the machine stalls.
+        self._q = queue.Queue(maxsize=256)
         self._lock = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
 

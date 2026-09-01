@@ -260,6 +260,20 @@ SLEEP_RISE = 1.0 / 900.0       # awake -> fully sleepy in ~15 min
 SLEEP_FALL = 1.0 / 240.0       # sleeps it off ~4x faster
 SLEEP_ENTER = 0.80
 SLEEP_STIM_GATE = 0.16
+
+# Asleep, breathing slows right down and deepens - the clearest non-verbal cue
+# that something is sleeping rather than just sitting still.
+SLEEP_BREATHE_RATE = 0.35     # of the waking rate
+SLEEP_BREATHE_DEPTH = 2.2     # of the waking amplitude
+
+# Floating Z's. Drawn as three strokes, so no font is needed and they scale
+# with the window.
+ZZZ_EVERY = 2.4               # seconds between them
+ZZZ_LIFE = 4.0                # seconds to rise and fade
+ZZZ_RISE = 0.30               # of window height
+ZZZ_DRIFT = 0.10              # sideways wander, of window width
+ZZZ_SIZE = 0.055              # of window height at birth
+ZZZ_GROW = 1.9                # size multiplier by the end
 MIN_SLEEP = 30.0               # never wake purely on debt sooner than this
 
 # gaze
@@ -483,6 +497,8 @@ class Face:
         self._sacc = [0.0, 0.0]
         self._next_sacc = random.uniform(*SACCADE_EVERY)
 
+        self._zzz = []              # floating sleep marks
+        self._next_zzz = 0.8
         self.activity = "observing"
         self._next_activity = random.uniform(*ACTIVITY_HOLD)
         self.sleep_pressure = 0.0
@@ -599,6 +615,7 @@ class Face:
 
         self._emotion_age += dt
         self._blend_motion(dt)
+        self._update_zzz(dt)
         if self._gesture is not None:
             self._gesture_t += dt
             if self._gesture_t >= GESTURES[self._gesture]["dur"]:
@@ -609,6 +626,21 @@ class Face:
         self.right.set_target(shape)
         self.left.update(dt, self._motion["freq"], self._motion["zeta"])
         self.right.update(dt, self._motion["freq"], self._motion["zeta"])
+
+    def _update_zzz(self, dt):
+        """Spawn and age the floating Z's. Only while actually asleep."""
+        for z in self._zzz:
+            z["t"] += dt
+        self._zzz = [z for z in self._zzz if z["t"] < ZZZ_LIFE]
+        if self.mode != "sleeping":
+            self._next_zzz = 0.8
+            return
+        self._next_zzz -= dt
+        if self._next_zzz <= 0:
+            self._next_zzz = ZZZ_EVERY * random.uniform(0.85, 1.15)
+            self._zzz.append({"t": 0.0,
+                              "sway": random.uniform(-1.0, 1.0),
+                              "tilt": random.uniform(-0.25, 0.25)})
 
     def _blend_motion(self, dt):
         """Ease the motion signature toward the current emotion's. The spring
@@ -777,6 +809,15 @@ class Face:
         if self._t < self._antic_until and self._antic_from is not None:
             a = self._antic_from
             shape = {k: a[k] - (shape[k] - a[k]) * self._antic_amt for k in SHAPE_KEYS}
+        if self.mode == "sleeping":
+            # Asleep is asleep. Without this the emotion's tilt and asymmetric
+            # lids survive into closed eyes, and a shut eye reads as a sad or
+            # annoyed squint instead of a sleeping one.
+            lid = (shape["top_in"] + shape["top_out"]) * 0.5
+            shape["top_in"] = shape["top_out"] = lid
+            shape["ang"] = 0.0
+            shape["bend"] = shape["tbend"] = 0.0
+
         return shape
 
     def _gesture_offsets(self):
@@ -826,7 +867,11 @@ class Face:
             self._vgrad = _build_vgrad()
 
         mo = self._motion
-        breathe = math.sin(self._t * 1.6 * mo["breathe_hz"]) * (H * 0.006 * mo["breathe"])
+        rate, depth = mo["breathe_hz"], mo["breathe"]
+        if self.mode == "sleeping":
+            rate *= SLEEP_BREATHE_RATE
+            depth *= SLEEP_BREATHE_DEPTH
+        breathe = math.sin(self._t * 1.6 * rate) * (H * 0.006 * depth)
         bf = self._blink_factor()
         _, _, g_dx, g_tilt = self._gesture_offsets()
 
@@ -867,5 +912,41 @@ class Face:
                         base_w * rm, base_h * rm, bf, self._hotspot, gx, gy, tint,
                         self._vgrad)
 
+        self._draw_zzz(surf, W, H, gap)
+
         if SCANLINE_ALPHA > 0:
             surf.blit(self._scanlines, (0, 0))
+
+    def _draw_zzz(self, surf, W, H, gap):
+        """Z's rising from beside the right eye, growing and fading."""
+        if not self._zzz:
+            return
+        for z in self._zzz:
+            p = z["t"] / ZZZ_LIFE
+            # fade in quickly, then out over the rest of the life
+            alpha = min(1.0, p / 0.15) * (1.0 - p) ** 1.4
+            if alpha <= 0.01:
+                continue
+            size = H * ZZZ_SIZE * (1.0 + (ZZZ_GROW - 1.0) * p)
+            cx = W * 0.5 + gap * 1.5 + z["sway"] * W * ZZZ_DRIFT * p
+            cy = H * 0.42 - p * H * ZZZ_RISE
+            self._blit_z(surf, cx, cy, size, alpha, z["tilt"])
+
+    @staticmethod
+    def _blit_z(surf, cx, cy, size, alpha, tilt):
+        pad = int(size * 0.9)
+        box = int(size * 2) + pad
+        tmp = pygame.Surface((box, box), pygame.SRCALPHA)
+        w, h = size * 0.78, size
+        ox, oy = box / 2, box / 2
+        col = (EYE_COLOR[0], EYE_COLOR[1], EYE_COLOR[2],
+               max(0, min(255, int(255 * alpha))))
+        thick = max(2, int(size * 0.16))
+        pts = [((ox - w / 2, oy - h / 2), (ox + w / 2, oy - h / 2)),
+               ((ox + w / 2, oy - h / 2), (ox - w / 2, oy + h / 2)),
+               ((ox - w / 2, oy + h / 2), (ox + w / 2, oy + h / 2))]
+        for a, b in pts:
+            pygame.draw.line(tmp, col, a, b, thick)
+        if abs(tilt) > 0.01:
+            tmp = pygame.transform.rotate(tmp, tilt * 40.0)
+        surf.blit(tmp, tmp.get_rect(center=(int(cx), int(cy))))

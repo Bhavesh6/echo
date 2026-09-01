@@ -247,6 +247,8 @@ def _remember(mem, brain):
     try:
         if mem.update(brain, brain.turns):
             brain.context = mem.context()
+            brain.known_names = ([mem.data["name"]]
+                                 if mem.data.get("name") else [])
             log("memory updated: name=%s facts=%d"
                 % (mem.data.get("name"), len(mem.data.get("facts", []))))
     except Exception as e:
@@ -325,19 +327,21 @@ def main():
             print("mic: %s" % (sd_name(dev) if dev is not None else "system default"))
         except Exception as e:
             print("mic unavailable: %s" % e)
+    wake = None
+    awake_until = 0.0
+    wake_gate = True
     if listener is not None and voice_mod is not None:
         try:
             wake = voice_mod.WakeWord()
             listener.wake = wake
-            print("wake word: say '%s' to start talking to it"
-                  % wake.phrase.replace("_", " "))
+            msg = ("wake word ACTIVE: say '%s' to start talking to it"
+                   % wake.phrase.replace("_", " "))
+            print(msg); log(msg)
         except Exception as e:
-            print("wake word unavailable (%s) - it will answer any speech" % e)
+            msg = "wake word UNAVAILABLE (%s) - it will answer any speech" % e
+            print(msg); log(msg)
     heard = False
     peak = 0.0
-    wake = None
-    awake_until = 0.0
-    wake_gate = True
     mem = None
     if memory_mod is not None:
         mem = memory_mod.Memory()
@@ -354,6 +358,7 @@ def main():
             convo = Conversation(b)
             if mem is not None:
                 b.context = mem.context()
+                b.known_names = [mem.data["name"]] if mem.data.get("name") else []
             print("brain: %s | stt=%s chat=%s"
                   % (type(b).__name__, brain_mod.STT_MODEL, b.chat_model))
         except Exception as e:
@@ -431,6 +436,9 @@ def main():
             log("wake word heard")
             face.event("wake_word")          # perk + surprise, as Vector did
             face.set_mode("listening")
+            if listener is not None:
+                # Drop whatever was being captured before we were addressed.
+                listener.restart_utterance()
             awake_until = now + AWAKE_WINDOW
             demo_on = False
         awake = (wake is None) or (not wake_gate) or (now < awake_until)
@@ -457,6 +465,8 @@ def main():
                 if not heard:
                     heard = True
                     face.event("sound")
+                    log("heard speech but not addressed - ignoring "
+                        "(say the wake phrase)")
                 listener.take_utterance()    # discard, do not transcribe
             elif listener.speaking:
                 if not heard:

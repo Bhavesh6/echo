@@ -177,6 +177,8 @@ class Brain:
         # Long-term memory injects itself here; brain.py never needs to
         # know what a Memory is.
         self.context = ""
+        # Spellings fed to the transcriber so it stops mangling names.
+        self.known_names = []
 
     def raw(self, prompt, max_tokens=600):
         """A plain completion with no companion persona - for background
@@ -216,10 +218,26 @@ class Brain:
             language=language,
             temperature=0.0,
             response_format="text",
+            # NO prompt= here, deliberately. Whisper's prompt parameter is
+            # documented for spelling unfamiliar words, but measured on real
+            # recordings it made things WORSE: passing the known name turned a
+            # correct "Bhavesh" into "Bhabesh", and turned a clean "Thank you."
+            # into "I'm going to go to the table." It biases hard toward the
+            # prompt and hallucinates on short clips.
         )
         return (r if isinstance(r, str) else getattr(r, "text", "")).strip()
 
     # ------------------------------------------------------------ thinking
+    def spelling_hint(self):
+        """Up to 224 tokens of context for the transcriber. Names first, since
+        those are what it gets wrong."""
+        bits = ["The speaker is talking to a small desk robot."]
+        names = [n for n in (self.known_names or []) if n]
+        if names:
+            bits.append("Names that may be spoken, spelled correctly: "
+                        + ", ".join(names) + ".")
+        return " ".join(bits)[:900]
+
     @staticmethod
     def now_line():
         """The clock is right there on the machine - there is no reason for it
