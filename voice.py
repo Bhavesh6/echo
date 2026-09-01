@@ -274,6 +274,19 @@ class Speaker:
         """Speak this piece, appending to anything already playing."""
         self._jobs.put(("stream", text))
 
+    def beep(self, name):
+        """One non-verbal sound, played immediately - these are punctuation,
+        so they are dropped rather than queued if speech is already going.
+        Cozmo's audio lead: "if you have voice-over for every single thing he
+        does, it totally gets old"."""
+        try:
+            import sounds
+        except Exception:
+            return
+        pcm = sounds.get(name)
+        if pcm is not None and not self.player.busy:
+            self.player.play(pcm)
+
     def _worker(self):
         while True:
             kind, text = self._jobs.get()

@@ -365,6 +365,7 @@ def main():
                mem.data.get("sessions"),
                "first meeting" if away is None else "%.1fh" % away))
     exchanges = 0
+    prev_mode = face.mode
     convo = None
     if brain_mod is not None and voice_mod is not None:
         try:
@@ -448,6 +449,8 @@ def main():
         now = time.time()
         if wake is not None and wake.take():
             log("wake word heard")
+            if speaker is not None:
+                speaker.beep("wake")         # answer instantly, before thinking
             face.event("wake_word")          # perk + surprise, as Vector did
             face.set_mode("listening")
             if listener is not None:
@@ -534,9 +537,21 @@ def main():
                     if speaker is None:
                         face.set_mode("idle")
                 else:
+                    # Nothing usable came back. A chirp says so faster than a
+                    # sentence would, and does not get old the way a repeated
+                    # apology does.
                     face.event("not_understood")
+                    if speaker is not None:
+                        speaker.beep("confused")
                     face.set_mode("idle")
 
+        if face.mode != prev_mode:
+            if speaker is not None:
+                if face.mode == "sleeping":
+                    speaker.beep("sleep")
+                elif prev_mode == "sleeping":
+                    speaker.beep("waking")
+        
         face.update(dt)
         face.draw(screen)
         if show_hud:

@@ -1255,9 +1255,19 @@ class Face:
     def _draw_blush(self, surf, W, H, gap, eye_cy):
         """Two soft ovals under the eyes. Opacity follows how happy it is, so
         this is ambient warmth rather than an effect that fires."""
-        warmth = clamp((self.dims["happy"] - 0.35) / 0.55)
+        # Blush is a MOMENT, not a resting state. Two things kept it on
+        # permanently: any happy emotion forced a floor, and the happy
+        # dimension has a two-minute half-life, so one kind word kept the
+        # cheeks lit for minutes. Same rule as the symbols - a face decorated
+        # at all times is a face saying nothing.
+        # One compliment lifts the happy dimension to 0.80, so the bar has to
+        # sit AT that - otherwise a single kind word leaves the cheeks lit for
+        # the dimension's two-minute half-life. Above 0.80 means repeated
+        # warmth, and that is worth showing.
+        warmth = clamp((self.dims["happy"] - 0.80) / 0.20)
         if self.emotion in ("happy", "pleading"):
-            warmth = max(warmth, 0.55)
+            fresh = clamp(1.0 - self._emotion_age / EMOTION_HOLD)
+            warmth = max(warmth, fresh * 0.9)
         if self.mode == "sleeping":
             warmth *= 0.5
         if warmth < 0.03:

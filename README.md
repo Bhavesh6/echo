@@ -175,6 +175,26 @@ cheapest large gain in friendliness available.
 Everything is drawn as strokes and shapes — no fonts, no image assets, and it
 all scales with the window.
 
+## It has a voice besides speech
+
+Cozmo barely speaks English. Almost all of its character arrives as chirps and
+warbles, and Anki's audio lead was explicit about why:
+
+> "If you have voice-over for every single thing he does, it totally gets old.
+> So the other system I wanted to build is subtlety."
+> — Ben Gabaldon, Audio Lead, Anki
+
+Their voice "combines human- and animal-inspired syllables with motor sounds
+and more robot-like beeps". So `sounds.py` synthesises eleven short
+vocalisations — none of them pure beeps. Each glides in pitch, carries vibrato
+and a couple of harmonics, because a bare sine wave reads as a microwave
+finishing rather than as a creature. All generated, no audio files.
+
+Say the wake phrase and it chirps back **immediately**, before it has heard
+your question or thought about anything. Fail to make sense and it warbles
+rather than apologising in a full sentence for the fifth time. It yawns going
+to sleep and again on waking.
+
 ## Wake word
 
 `openWakeWord`, running locally on the CPU — no key, no network, nothing
