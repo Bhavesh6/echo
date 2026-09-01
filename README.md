@@ -1,7 +1,10 @@
-# companion
+# Echo
 
 A small desk companion with two expressive eyes that listens, thinks and talks
 back. Cozmo/Vector-inspired, running on a PC.
+
+It named itself. Asked what it could do, it said *"let's keep building Echo
+together"* — so that is what it is called.
 
 You speak, it hears you, transcribes, answers, and says the reply out loud —
 with the eyes reacting the whole way through.
@@ -14,7 +17,7 @@ mic → wake word → VAD → Groq Whisper → LLM → TTS → speaker
                               long-term memory (JSON)
 ```
 
-It only answers once you say the wake phrase — "hey jarvis" by default. That
+It only answers once you say the wake phrase. That
 opens a conversation window which every reply extends, so you say it once and
 then talk normally. Outside the window it still notices sound (stimulation
 rises, the eyes react) but it does not interrupt. Anki put trigger-word
@@ -196,6 +199,22 @@ rather than apologising in a full sentence for the fifth time. It yawns going
 to sleep and again on waking.
 
 ## Wake word
+
+**Saying "hey echo" needs a model that does not exist yet.** openWakeWord ships
+only six phrases — `alexa`, `hey_mycroft`, `hey_jarvis`, `hey_rhasspy`, `timer`,
+`weather` — and Echo is not among them. Until one is trained, `hey_jarvis`
+stands in.
+
+Training one is free and takes about 90 minutes, in a browser, on
+[a maintained 2026 Colab notebook](https://github.com/alfiedennen/openwakeword-colab-2026)
+(the official notebook has bit-rotted and fails on Python 3.12). It generates
+synthetic examples of the phrase with Piper TTS and trains against a large
+negative corpus. Drop the resulting `.onnx` into `wake/` and it takes over
+automatically — no code change, no config.
+
+Picovoice Porcupine is the alternative and its console makes a custom phrase in
+one line of text, but custom words are restricted on its free tier, so the
+Colab route is the one that stays free and fully local.
 
 `openWakeWord`, running locally on the CPU — no key, no network, nothing
 leaves the machine until you actually address it. Measured on a 2013 i5 at

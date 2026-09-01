@@ -6,3 +6,5 @@ clips/
 session.log
 memory.json
 memory.json.tmp
+wake/*.onnx
+wake/*.tflite

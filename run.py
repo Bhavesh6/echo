@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run.py - drives the face.
+run.py - drives Echo.
 
 Two drivers today:
   KEYBOARD - you are the voice loop, poke it by hand
@@ -317,7 +317,7 @@ def draw_hud(screen, font, face, demo_on, voice_label="-", level=0.0,
 
 def main():
     pygame.init()
-    pygame.display.set_caption("companion")
+    pygame.display.set_caption("Echo")
     W, H = 1024, 600
     screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
     clock = pygame.time.Clock()

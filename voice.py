@@ -366,6 +366,18 @@ PRE_ROLL_BLOCKS = 40         # ~0.64 s
 MAX_UTTERANCE = 20.0         # seconds; stops a stuck VAD eating all memory
 
 
+def _find_wake_model():
+    """Any .onnx/.tflite dropped in the wake/ folder becomes the wake word.
+    This is how a trained "hey echo" arrives without touching code."""
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), WAKE_MODEL_DIR)
+    if not os.path.isdir(d):
+        return None
+    for f in sorted(os.listdir(d)):
+        if f.lower().endswith((".onnx", ".tflite")):
+            return os.path.join(d, f)
+    return None
+
+
 def input_device(name_part="respeaker", api="WASAPI"):
     for i, d in enumerate(sd.query_devices()):
         a = sd.query_hostapis(d["hostapi"])["name"]
@@ -481,6 +493,11 @@ class Listener:
 # Anki put trigger-word detection at priority 2 in Vector's behaviour tree -
 # only physical safety outranked hearing its name. Without it a companion
 # reacts to the television, to other people, to you muttering at your desk.
+# openWakeWord only ships six phrases and "echo" is not one of them, so until
+# a custom model is trained the built-in stand-in is used. Drop a trained
+# model at wake/hey_echo.onnx (or set WAKE_MODEL in .env) and it takes over
+# with no code change.
+WAKE_MODEL_DIR = "wake"
 WAKE_PHRASE = "hey_jarvis"   # also: alexa, hey_mycroft, hey_rhasspy
 WAKE_THRESHOLD = 0.28        # 0..1. Measured on real recordings from this
                              # mic: a clear 'hey jarvis' scores 0.92, one run
@@ -500,8 +517,19 @@ class WakeWord:
         self.phrase = phrase or find_api_key("WAKE_PHRASE") or WAKE_PHRASE
         self.threshold = float(find_api_key("WAKE_THRESHOLD")
                                or threshold or WAKE_THRESHOLD)
-        self.model = Model(wakeword_models=[self.phrase],
-                           inference_framework=framework)
+        # A custom model file wins over the built-in phrases.
+        custom = find_api_key("WAKE_MODEL") or _find_wake_model()
+        if custom:
+            self.phrase = os.path.splitext(os.path.basename(custom))[0]
+            self.model = Model(wakeword_models=[custom],
+                               inference_framework=(
+                                   "tflite" if custom.endswith(".tflite")
+                                   else "onnx"))
+            self.custom = custom
+        else:
+            self.model = Model(wakeword_models=[self.phrase],
+                               inference_framework=framework)
+            self.custom = None
         self.score = 0.0
         self.enabled = True
         self._pending = False
