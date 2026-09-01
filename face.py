@@ -297,6 +297,29 @@ SACCADE_LERP = 0.55          # flick speed: a saccade is near-instant
 # like one rigid slab.
 HOTSPOT_LEAD = 2.4
 
+# ---- gaze aversion, from Andrist et al. (HRI 2014), who coded real human
+# conversation. (mean, sd) in seconds. Cognitive aversions go UP; the social
+# ones go mostly sideways and are much smaller.
+AVERSION = {
+    "cognitive": dict(length=(3.54, 1.26), gap=(2.0, 0.6), up=0.75, scale=1.00),
+    "listening": dict(length=(1.14, 0.27), gap=(7.21, 1.88), up=0.25, scale=0.40),
+    "speaking":  dict(length=(1.96, 0.32), gap=(4.75, 1.39), up=0.25, scale=0.40),
+}
+AVERT_H = 0.62          # sideways magnitude in look units (~28 deg equivalent)
+AVERT_V = 0.44          # vertical (~20 deg)
+
+# A gaze shift eases in AND out. Exponential smoothing only eases out, so every
+# movement begins at full speed, which reads as a twitch.
+SHIFT_TIME = 0.42
+
+# Idle drift is band-limited noise, never a jump. Disney used Perlin noise for
+# this exact purpose; one-dimensional value noise is the same idea and needs no
+# dependency.
+DRIFT_RATE = 0.30       # steps per second through the noise field, i.e. one
+                        # new noise value about every 3 s. Traversing it fast
+                        # turns smooth noise back into jitter.
+DRIFT_AMOUNT = 0.16     # how far it wanders, in look units
+
 # one-shot "get in" gestures
 GESTURES = {
     "perk":   dict(dur=0.45, kind="perk"),
@@ -330,6 +353,31 @@ def lerp(a, b, t):
 
 def clamp(v, lo=0.0, hi=1.0):
     return lo if v < lo else hi if v > hi else v
+
+
+class _Noise:
+    """One-dimensional value noise: a smooth, band-limited pseudorandom signal.
+    Unlike picking a new random target every few seconds it never jumps, and
+    unlike a sine wave it never repeats obviously - which is what makes idle
+    motion read as alive rather than as either twitchy or mechanical."""
+
+    def __init__(self, seed, n=512):
+        rng = random.Random(seed)
+        self.v = [rng.uniform(-1.0, 1.0) for _ in range(n)]
+
+    def __call__(self, t):
+        n = len(self.v)
+        x = (t % n + n) % n
+        i = int(x)
+        f = x - i
+        a, b = self.v[i % n], self.v[(i + 1) % n]
+        return a + (b - a) * (f * f * (3 - 2 * f))      # smoothstep
+
+
+def ease(p):
+    """Slow, fast, slow - the velocity profile of a real gaze shift."""
+    p = clamp(p)
+    return p * p * (3 - 2 * p)
 
 
 def smooth(cur, target, rate, dt):
@@ -518,8 +566,15 @@ class Face:
         self._blink_t = None
         self._next_blink = random.uniform(2.5, 5.0)
 
-        self._look = [0.0, 0.0]
-        self._look_t = [0.0, 0.0]
+        self._look = [0.0, 0.0]          # where the eyes actually point
+        self._look_t = [0.0, 0.0]        # where a shift is heading
+        self._look_from = [0.0, 0.0]     # where that shift began
+        self._shift_t = 1.0              # progress through the current shift
+        self._averting = False
+        self._avert_left = 0.0           # seconds remaining of this aversion
+        self._next_avert = 3.0
+        self._noise = (_Noise(11), _Noise(29))
+        self._drift = [0.0, 0.0]
         self._next_look = random.uniform(*ACTIVITY_HOLD)
         self._sacc = [0.0, 0.0]
         self._sacc_t = [0.0, 0.0]
@@ -722,56 +777,105 @@ class Face:
                 break
         self._next_activity = random.uniform(*ACTIVITY_HOLD)
 
+    def _shift_to(self, x, y):
+        """Begin an eased move of the gaze to a new point."""
+        self._look_from = list(self._look)
+        self._look_t = [clamp(x, -1, 1), clamp(y, -1, 1)]
+        self._shift_t = 0.0
+
+    def _pick_aversion(self, kind):
+        """Direction and size of an aversion, per its conversational function.
+        Cognitive ones go up (thinking); social ones go sideways and small."""
+        spec = AVERSION[kind]
+        if random.random() < spec["up"]:
+            x = random.uniform(-0.25, 0.25) * AVERT_H
+            y = -AVERT_V
+        else:
+            x = random.choice((-1, 1)) * AVERT_H * random.uniform(0.7, 1.0)
+            y = random.uniform(-0.25, 0.15) * AVERT_V
+        k = spec["scale"]
+        return x * k, y * k
+
     def _update_gaze(self, dt):
         style = MODES[self.mode]["gaze"]
-        if style == "wander":
+
+        if style == "still":
+            self._averting = False
+            self._shift_to(0.0, 0.35) if self._shift_t >= 1.0 and \
+                abs(self._look_t[1] - 0.35) > 0.01 else None
+        elif style == "wander":
             self._next_look -= dt
             if self._next_look <= 0:
                 if self.activity == "drifting":
-                    self._look_t = [random.uniform(-0.7, 0.7),
-                                    random.uniform(-0.5, 0.5)]
+                    self._shift_to(random.uniform(-0.7, 0.7),
+                                   random.uniform(-0.4, 0.4))
                     self._next_look = random.uniform(3.0, 6.0)
                 elif self.activity == "dozing":
-                    self._look_t = [random.uniform(-0.25, 0.25), random.uniform(0.2, 0.7)]
+                    self._shift_to(random.uniform(-0.2, 0.2),
+                                   random.uniform(0.2, 0.6))
                     self._next_look = random.uniform(4.0, 8.0)
-                else:  # observing - small, close-in glances
-                    self._look_t = [random.uniform(-0.35, 0.35),
-                                    random.uniform(-0.25, 0.25)]
-                    self._next_look = random.uniform(2.0, 4.0)
-        elif style == "avert":
-            # Thinking looks away and then back, in a rhythm. Holding a single
-            # off-centre stare for the whole think reads as broken, not
-            # thoughtful - and it never returns your gaze.
-            self._next_look -= dt
-            if self._next_look <= 0:
-                if abs(self._look_t[0]) > 0.15:
-                    self._look_t = [random.uniform(-0.08, 0.08), -0.05]
-                    self._next_look = random.uniform(0.7, 1.3)
                 else:
-                    self._look_t = [random.choice((-1, 1))
-                                    * random.uniform(0.20, 0.34), -0.22]
-                    self._next_look = random.uniform(0.5, 0.9)
-        elif style == "lock":
-            self._look_t = [0.0, 0.0]
-        elif style == "still":
-            self._look_t = [0.0, 0.35]
+                    self._shift_to(random.uniform(-0.3, 0.3),
+                                   random.uniform(-0.2, 0.2))
+                    self._next_look = random.uniform(2.5, 5.0)
+        else:
+            # lock / avert: hold the person's gaze, but break it periodically.
+            # Preferred mutual gaze is only 3-5 s before it gets uncomfortable,
+            # so a face that never looks away is a face that stares.
+            kind = "cognitive" if style == "avert" else (
+                "speaking" if self.mode == "speaking" else "listening")
+            spec = AVERSION[kind]
+            if self._averting:
+                self._avert_left -= dt
+                if self._avert_left <= 0:
+                    self._averting = False
+                    self._shift_to(0.0, 0.0)          # back to their eyes
+                    g_m, g_s = spec["gap"]
+                    self._next_avert = max(0.8, random.gauss(g_m, g_s))
+            else:
+                self._next_avert -= dt
+                if self._next_avert <= 0:
+                    self._averting = True
+                    l_m, l_s = spec["length"]
+                    self._avert_left = max(0.4, random.gauss(l_m, l_s))
+                    self._shift_to(*self._pick_aversion(kind))
 
-        # The emotion pulls the gaze: downcast for sad, upturned for pleading.
-        # That pull is what separates those two, not their near-identical shapes.
-        bx = clamp(self._look_t[0] + self._motion["gaze_x"], -1, 1)
-        by = clamp(self._look_t[1] + self._motion["gaze_y"], -1, 1)
-        self._look[0] = smooth(self._look[0], bx, LOOK_LERP, dt)
-        self._look[1] = smooth(self._look[1], by, LOOK_LERP, dt)
+        # advance the eased shift
+        if self._shift_t < 1.0:
+            self._shift_t = min(1.0, self._shift_t + dt / SHIFT_TIME)
+            e = ease(self._shift_t)
+            bias_x = self._motion["gaze_x"]
+            bias_y = self._motion["gaze_y"]
+            for i, b in ((0, bias_x), (1, bias_y)):
+                a = self._look_from[i]
+                z = clamp(self._look_t[i] + b, -1, 1)
+                self._look[i] = a + (z - a) * e
+        else:
+            # settled: hold the target, plus the emotion's pull
+            self._look[0] = smooth(self._look[0],
+                                   clamp(self._look_t[0] + self._motion["gaze_x"], -1, 1),
+                                   LOOK_LERP, dt)
+            self._look[1] = smooth(self._look[1],
+                                   clamp(self._look_t[1] + self._motion["gaze_y"], -1, 1),
+                                   LOOK_LERP, dt)
 
-        # Micro-saccades. Perfectly steady eyes look dead even when locked on.
-        # Flick between the three points of the triangle rather than jittering
-        # to a new random spot each time - a real saccade lands somewhere, it
-        # does not wander.
+        # Always-on idle drift, kept SEPARATE from the gaze target. Adding it
+        # into _look each frame made it accumulate into a random walk that
+        # wandered far outside its own limit.
+        if self.mode == "sleeping":
+            self._drift = [0.0, 0.0]
+        else:
+            d = DRIFT_AMOUNT * max(0.4, self._motion["drift"])
+            self._drift = [self._noise[0](self._t * DRIFT_RATE) * d,
+                           self._noise[1](self._t * DRIFT_RATE) * d * 0.6]
+
+        # saccades: fast flicks between three points on the face being looked
+        # at. These move the PUPIL, not the eye.
         drift = max(0.15, self._motion["drift"])
         self._next_sacc -= dt
         if self._next_sacc <= 0 and self.mode != "sleeping":
             nxt = random.randrange(len(SACCADE_POINTS))
-            if nxt == self._sacc_i:                    # always actually move
+            if nxt == self._sacc_i:
                 nxt = (nxt + 1) % len(SACCADE_POINTS)
             self._sacc_i = nxt
             px, py = SACCADE_POINTS[nxt]
@@ -930,7 +1034,8 @@ class Face:
         # pupil: in a real face the eyeball flicks inside a head that is not
         # moving, and translating the whole eye four times a second is what
         # made this judder.
-        gx, gy = self._look[0], self._look[1]
+        gx = clamp(self._look[0] + self._drift[0], -1.0, 1.0)
+        gy = clamp(self._look[1] + self._drift[1], -1.0, 1.0)
         hx = clamp(gx + self._sacc[0], -1.0, 1.0)
         hy = clamp(gy + self._sacc[1], -1.0, 1.0)
         look_x = gx * gap * LOOK_RANGE_X + g_dx * base_w
