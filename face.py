@@ -53,6 +53,37 @@ HOTSPOT_RANGE = 0.22      # hotspot travel, as a fraction of eye size
 # renders almost flat.
 HOTSPOT_EDGE = 0.42
 
+# Pupil size per emotion. Manga: tiny pupils in wide eyes = serious anger or
+# dark surprise; near-blank pupils = shock or fear. 1.0 is normal.
+EMOTION_PUPIL = {
+    "neutral": 1.00, "happy": 1.10, "sad": 0.90, "curious": 1.05,
+    "surprised": 0.55, "annoyed": 0.70, "sleepy": 1.15,
+    "pleading": 1.25, "scared": 0.42,
+}
+PUPIL_STEPS = 3          # small / normal / large. Six steps meant six large
+                         # cached surfaces, and the memory cost outweighed the
+                         # extra fidelity - nobody can see the difference
+                         # between six pupil sizes anyway.
+HOTSPOT_COVER = 1.7      # multiple of the eye the gradient must span: the eye
+                         # itself plus the pupil's travel, with margin.
+
+# Eye colour per emotion. Blended, never switched, so it reads as a mood
+# settling over the face rather than a lamp changing bulb.
+EMOTION_TINT = {
+    "neutral": (30, 205, 255),
+    "happy": (90, 240, 255),
+    "sad": (70, 145, 225),
+    "curious": (120, 230, 255),
+    "surprised": (160, 245, 255),
+    "annoyed": (255, 135, 110),
+    "sleepy": (55, 135, 190),
+    "pleading": (255, 175, 215),
+    "scared": (200, 210, 255),
+}
+TINT_LERP = 0.9          # per-second approach to the emotion's colour
+
+WINK_DURATION = 0.30
+
 # Vector's display has a scanline opacity factor - a subtle CRT feel. Set
 # SCANLINE_ALPHA = 0 for the clean, modern look (LOOI has no scanlines).
 SCANLINE_ALPHA = 0       # 0 = off. LOOI has none; they read as cheap here.
@@ -219,7 +250,7 @@ EVENTS = {
     "not_understood": dict(stim=+0.05, confident=-0.18, emotion="curious", gesture="tilt", symbol="question"),
     # --- social. Vector had a separately authored behaviour for each of these.
     "greeting":       dict(stim=+0.40, social=+0.30, happy=+0.20, emotion="happy", gesture="perk"),
-    "compliment":     dict(stim=+0.20, social=+0.25, happy=+0.45, emotion="happy", gesture="bounce", symbol="sparkle"),
+    "compliment":     dict(stim=+0.20, social=+0.25, happy=+0.45, emotion="happy", gesture="bounce", symbol="sparkle", wink=True),
     "affection":      dict(stim=+0.25, social=+0.35, happy=+0.55, emotion="happy", gesture="bounce", symbol="heart"),
     "apology":        dict(social=+0.15, happy=+0.20, emotion="happy"),
     "abuse":          dict(stim=+0.20, happy=-0.45, confident=-0.20, emotion="sad", symbol="tear"),
@@ -456,20 +487,29 @@ def _superellipse(cx, cy, a, b, n, steps=SHAPE_STEPS):
     return pts
 
 
-def _build_hotspot(size):
+HOTSPOT_BUILD = 288      # a smooth radial gradient carries no fine detail, so
+                         # build it small and scale up. Building it at full
+                         # size (~1500px) cost 3x the whole frame budget once
+                         # the pupil started changing size.
+
+
+def _build_hotspot(size, edge=None):
     """Radial gradient, white at the centre falling to grey at the rim. Blitted
     over an eye with BLEND_RGBA_MULT it becomes soft spherical shading. Built
     from many concentric circles so there is no visible banding, and rebuilt
     only on resize."""
-    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+    build = min(size, HOTSPOT_BUILD)
+    surf = pygame.Surface((build, build), pygame.SRCALPHA)
     surf.fill((0, 0, 0, 255))
     steps = 110
-    c = size // 2
+    c = build // 2
     for i in range(steps, 0, -1):
         f = i / steps
-        k = min(1.0, f / HOTSPOT_EDGE)
+        k = min(1.0, f / (edge if edge else HOTSPOT_EDGE))
         v = int(255 * (1.0 - HOTSPOT_FALLOFF * (k ** 1.7)))
         pygame.draw.circle(surf, (v, v, v, 255), (c, c), max(1, int(c * f)))
+    if build != size:
+        surf = pygame.transform.smoothscale(surf, (size, size))
     return surf
 
 
@@ -651,12 +691,14 @@ class Face:
         self._antic_from = None
         self._antic_amt = 0.0
 
-        self._hotspot = None
-        self._hotspot_for = 0
         self._vgrad = None
         self._scanlines = None
         self._scan_for = (0, 0)
         self._blush = None
+        self._hotspots = {}          # pupil scale -> surface
+        self._pupil = 1.0
+        self._tint = list(EMOTION_TINT["neutral"])
+        self._wink = None            # (side, elapsed)
 
     # ------------------------------------------------------------- controls
     def set_mode(self, mode):
@@ -731,6 +773,8 @@ class Face:
             self.gesture(spec["gesture"])
         if "symbol" in spec and scale > 0.3:
             self.symbol(spec["symbol"])
+        if spec.get("wink") and scale > 0.3:
+            self.wink()
         if self.mode == "sleeping" and self.dims["stim"] > SLEEP_STIM_GATE:
             self.set_mode("idle")
 
@@ -757,6 +801,7 @@ class Face:
 
         self._emotion_age += dt
         self._blend_motion(dt)
+        self._blend_look(dt)
         self._update_symbols(dt)
         if self._gesture is not None:
             self._gesture_t += dt
@@ -802,6 +847,47 @@ class Face:
             lo, hi = SYMBOL_EVERY
             self._next_symbol = random.uniform(lo, hi)
             self.symbol(want)
+
+    def wink(self, side=None):
+        """Close one eye. EMO does a cheeky wink; it is the one asymmetry that
+        reads as playful rather than as a fault."""
+        if self._wink is None:
+            self._wink = [side if side in (-1, 1) else random.choice((-1, 1)), 0.0]
+
+    def _blend_look(self, dt):
+        """Ease pupil size and eye colour toward whatever the emotion wants."""
+        want_p = EMOTION_PUPIL.get(self.emotion, 1.0)
+        want_c = EMOTION_TINT.get(self.emotion, EMOTION_TINT["neutral"])
+        if self._emotion_age > EMOTION_HOLD:      # decaying back to neutral
+            want_p = EMOTION_PUPIL["neutral"]
+            want_c = EMOTION_TINT["neutral"]
+        self._pupil = smooth(self._pupil, want_p, 0.10, dt)
+        for i in range(3):
+            self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP * dt * 6, dt)
+        if self._wink is not None:
+            self._wink[1] += dt
+            if self._wink[1] >= WINK_DURATION:
+                self._wink = None
+
+    def _pupil_hotspot(self, size, pupil):
+        """Hotspots cached at a few discrete pupil sizes - rescaling a large
+        gradient surface every frame would be pure waste."""
+        # map pupil 0.4..1.3 onto the available steps
+        step = max(1, min(PUPIL_STEPS,
+                          int(round(1 + (pupil - 0.4) / 0.45))))
+        key = (size, step)
+        surf = self._hotspots.get(key)
+        if surf is None:
+            # Build EVERY pupil size for this eye size at once. Building them
+            # lazily meant a rebuild whenever the pupil crossed a step, and
+            # that single frame measured 19.7 ms - past the 16.7 ms budget, so
+            # a visible hitch exactly when an emotion changed.
+            self._hotspots = {}
+            for st in range(1, PUPIL_STEPS + 1):
+                self._hotspots[(size, st)] = _build_hotspot(
+                    size, edge=HOTSPOT_EDGE * (0.45 + 0.35 * st))
+            surf = self._hotspots[key]
+        return surf
 
     def _blend_motion(self, dt):
         """Ease the motion signature toward the current emotion's. The spring
@@ -1087,10 +1173,8 @@ class Face:
         base_w, base_h = W * EYE_W_FRAC, H * EYE_H_FRAC
         gap, cy = W * EYE_GAP_FRAC, H * 0.5
 
-        hs_size = int(max(base_w, base_h) * 2.6 * SUPERSAMPLE)
-        if self._hotspot is None or self._hotspot_for != hs_size:
-            self._hotspot = _build_hotspot(hs_size)
-            self._hotspot_for = hs_size
+        hs_size = int(max(base_w, base_h) * HOTSPOT_COVER * SUPERSAMPLE)
+        hotspot = self._pupil_hotspot(hs_size, self._pupil)
         if self._scanlines is None or self._scan_for != (W, H):
             self._scanlines = _build_scanlines(W, H)
             self._scan_for = (W, H)
@@ -1104,6 +1188,14 @@ class Face:
             depth *= SLEEP_BREATHE_DEPTH
         breathe = math.sin(self._t * 1.6 * rate) * (H * 0.006 * depth)
         bf = self._blink_factor()
+        bf_l = bf_r = bf
+        if self._wink is not None:
+            side, t = self._wink
+            w = 1.0 - math.sin(clamp(t / WINK_DURATION) * math.pi) * (1.0 - BLINK_MIN)
+            if side < 0:
+                bf_l = min(bf_l, w)
+            else:
+                bf_r = min(bf_r, w)
         _, _, g_dx, g_tilt = self._gesture_offsets()
 
         # The EYE only follows the slow gaze drift. Saccades belong to the
@@ -1127,7 +1219,8 @@ class Face:
         # Eyes brighten a little with the voice - a cheap but strong "that
         # sound is coming from me" cue while speaking.
         lift = clamp(0.30 * self._amp * MODES[self.mode]["amp_gain"] * 5, 0.0, 0.35)
-        tint = tuple(int(c + (255 - c) * lift) for c in EYE_COLOR)
+        tint = tuple(max(0, min(255, int(c + (255 - c) * lift)))
+                     for c in self._tint)
 
         # Asymmetry. Looking left grows the left eye and shrinks the right,
         # which reads as the near eye being closer to you - Cozmo's "curious"
@@ -1143,10 +1236,10 @@ class Face:
 
         tilt = g_tilt * base_h
         self.left.draw(surf, W * 0.5 - gap + look_x, cy + look_y + breathe - tilt,
-                       base_w * lm, base_h * lm, bf, self._hotspot, hx, hy, tint,
+                       base_w * lm, base_h * lm, bf_l, hotspot, hx, hy, tint,
                        self._vgrad)
         self.right.draw(surf, W * 0.5 + gap + look_x, cy + look_y + breathe + tilt,
-                        base_w * rm, base_h * rm, bf, self._hotspot, hx, hy, tint,
+                        base_w * rm, base_h * rm, bf_r, hotspot, hx, hy, tint,
                         self._vgrad)
 
         self._draw_blush(surf, W, H, gap, cy + look_y + breathe)

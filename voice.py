@@ -59,6 +59,7 @@ class Player:
         self._pos = 0
         self._lock = threading.Lock()
         self._level = 0.0
+        self._scale = 1.0
         self.stream = sd.OutputStream(
             samplerate=samplerate, channels=1, dtype="float32",
             blocksize=blocksize, device=device, callback=self._callback)
@@ -88,10 +89,26 @@ class Player:
     def play(self, pcm):
         pcm = np.asarray(pcm, dtype=np.float32)
         peak = float(np.abs(pcm).max()) if len(pcm) else 0.0
-        if peak > 0:
-            pcm = pcm * (0.90 / peak)      # normalise so LEVEL_GAIN is stable
+        self._scale = (0.90 / peak) if peak > 0 else 1.0
         with self._lock:
-            self._buf, self._pos = pcm, 0
+            self._buf, self._pos = pcm * self._scale, 0
+
+    def enqueue(self, pcm):
+        """Append to whatever is already playing, for streamed speech. The
+        gain from the FIRST piece is reused for the rest of the utterance -
+        normalising each sentence on its own peak would make quiet sentences
+        suddenly loud."""
+        pcm = np.asarray(pcm, dtype=np.float32)
+        with self._lock:
+            playing = self._pos < len(self._buf)
+            if not playing:
+                peak = float(np.abs(pcm).max()) if len(pcm) else 0.0
+                self._scale = (0.90 / peak) if peak > 0 else 1.0
+                self._buf, self._pos = pcm * self._scale, 0
+            else:
+                rest = self._buf[self._pos:]
+                self._buf = np.concatenate([rest, pcm * self._scale])
+                self._pos = 0
 
     def stop(self):
         with self._lock:
@@ -251,11 +268,15 @@ class Speaker:
         self._thread.start()
 
     def say(self, text):
-        self._jobs.put(text)
+        self._jobs.put(("say", text))
+
+    def stream(self, text):
+        """Speak this piece, appending to anything already playing."""
+        self._jobs.put(("stream", text))
 
     def _worker(self):
         while True:
-            text = self._jobs.get()
+            kind, text = self._jobs.get()
             try:
                 pcm = self.voice.pcm(text)
             except Exception as e:
@@ -275,9 +296,12 @@ class Speaker:
                     continue
             if self.on_start:
                 self.on_start(text)
-            self.player.play(pcm)
-            while self.player.busy:
-                threading.Event().wait(0.02)
+            if kind == "stream":
+                self.player.enqueue(pcm)
+            else:
+                self.player.play(pcm)
+                while self.player.busy:
+                    threading.Event().wait(0.02)
             if self.on_end:
                 self.on_end(text)
 

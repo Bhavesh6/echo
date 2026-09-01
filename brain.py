@@ -159,6 +159,27 @@ def to_wav_bytes(pcm, samplerate=SAMPLE_RATE):
     return buf.getvalue()
 
 
+MIN_FIRST = 12          # release the opening sentence early - that pause is
+MIN_CHUNK = 45          # the one that is felt. Later ones can be longer, so
+                        # the voice does not sound chopped up.
+
+
+def _sentence_end(buf, short=False):
+    """Index just past the first sentence in `buf`, or None. Only counts a
+    terminator that is actually followed by a space, so decimals and
+    abbreviations do not split a sentence in half."""
+    floor = MIN_FIRST if short else MIN_CHUNK
+    for i, c in enumerate(buf):
+        if c in ".!?" and i + 1 < len(buf) and buf[i + 1] in " \n\t":
+            if i + 1 >= floor:
+                return i + 1
+    if len(buf) > 180:            # a model that never punctuates
+        cut = buf.rfind(" ", 0, 180)
+        if cut > floor:
+            return cut
+    return None
+
+
 class Brain:
     """Transcribe, then answer. Both calls are blocking; run it off the render
     thread."""
@@ -281,6 +302,77 @@ class Brain:
         self.turns.append({"role": "user", "content": text})
         self.turns.append({"role": "assistant", "content": raw})
         return raw, emotion
+
+    # --------------------------------------------------------- streaming
+    def reply_stream(self, text):
+        """Yields ("emotion", name) as soon as the tag arrives, then
+        ("say", sentence) for each finished sentence, then ("done", full).
+
+        Sentences are emitted as they complete so speech can start while the
+        model is still writing. The first one is released early and short,
+        because that is the pause the user actually feels."""
+        msgs = [{"role": "system",
+                 "content": SYSTEM + "\n" + self.now_line() + self.context}]
+        msgs += self.turns[-self.history * 2:]
+        msgs.append({"role": "user", "content": text})
+
+        kw = dict(model=self.chat_model, messages=msgs, temperature=0.7,
+                  max_tokens=400, stream=True)
+        try:
+            stream = self.client.chat.completions.create(
+                reasoning_effort="low", **kw)
+        except Exception:
+            stream = self.client.chat.completions.create(**kw)
+
+        buf, full, emotion, sent_tag, first = "", "", "neutral", False, True
+        for chunk in stream:
+            try:
+                piece = chunk.choices[0].delta.content or ""
+            except (AttributeError, IndexError):
+                piece = ""
+            if not piece:
+                continue
+            buf += piece
+            full += piece
+
+            if not sent_tag:
+                m = TAG_RE.match(buf)
+                if m:
+                    tag = m.group(1).lower()
+                    if tag in EMOTIONS:
+                        emotion = tag
+                    buf = TAG_RE.sub("", buf, count=1)
+                    sent_tag = True
+                    yield ("emotion", emotion)
+                elif len(buf) > 24:       # no tag coming; stop waiting for one
+                    sent_tag = True
+                    yield ("emotion", emotion)
+
+            if sent_tag:
+                while True:
+                    cut = _sentence_end(buf, short=first)
+                    if cut is None:
+                        break
+                    piece_out = speakable(buf[:cut])
+                    buf = buf[cut:].lstrip()
+                    if piece_out:
+                        first = False
+                        yield ("say", piece_out)
+
+        if not sent_tag:
+            yield ("emotion", emotion)
+        tail = speakable(re.sub(r"\[[a-z]+\]", "", buf, flags=re.I))
+        if tail:
+            yield ("say", tail)
+
+        clean = speakable(re.sub(r"\[[a-z]+\]", "",
+                                TAG_RE.sub("", full, count=1), flags=re.I))
+        if not clean:
+            clean = "Sorry, I lost my train of thought there."
+            emotion = "curious"
+        self.turns.append({"role": "user", "content": text})
+        self.turns.append({"role": "assistant", "content": clean})
+        yield ("done", clean)
 
     def forget(self):
         self.turns = []

@@ -143,9 +143,23 @@ class Conversation:
                     self.results.put(("nothing", None))
                     continue
                 log("you said: %s" % heard)
-                reply, emotion = self.brain.reply(heard)
-                log("reply [%s]: %s" % (emotion, reply))
-                self.results.put(("reply", (heard, reply, emotion)))
+                # Stream it: the emotion tag arrives first so the face can
+                # react immediately, and each finished sentence is spoken
+                # while the rest is still being written.
+                import time as _t
+                t0 = _t.perf_counter()
+                said_any = False
+                for kind, val in self.brain.reply_stream(heard):
+                    if kind == "emotion":
+                        self.results.put(("emotion", (heard, val)))
+                    elif kind == "say":
+                        if not said_any:
+                            log("first words at %.2fs" % (_t.perf_counter() - t0))
+                            said_any = True
+                        self.results.put(("say", val))
+                    elif kind == "done":
+                        log("reply: %s" % val)
+                        self.results.put(("done", val))
             except Exception as e:
                 log("brain error: %s" % e)
                 self.results.put(("error", str(e)))
@@ -498,27 +512,27 @@ def main():
 
         # Drain the worker. Face changes happen here, on the main thread.
         if convo is not None:
-            try:
-                kind, payload = convo.results.get_nowait()
-            except queue.Empty:
-                pass
-            else:
-                if kind == "reply":
-                    last_heard, reply, emotion = payload
+            for _ in range(8):          # several may land in one frame
+                try:
+                    kind, payload = convo.results.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "emotion":
+                    last_heard, emotion = payload
+                    face.set_emotion(emotion)   # before a word is spoken
+                    face.event("understood")
+                    awake_until = time.time() + AWAKE_WINDOW
+                elif kind == "say":
+                    if speaker is not None:
+                        speaker.stream(payload)
+                elif kind == "done":
                     awake_until = time.time() + AWAKE_WINDOW
                     exchanges += 1
                     if mem is not None and exchanges % MEMORY_EVERY == 0:
                         threading.Thread(
                             target=_remember, args=(mem, b), daemon=True).start()
-                    face.set_emotion(emotion)
-                    face.event("understood")
-                    if speaker is not None:
-                        speaker.say(reply)
-                    else:
+                    if speaker is None:
                         face.set_mode("idle")
-                elif kind == "nothing":
-                    face.event("not_understood")
-                    face.set_mode("idle")
                 else:
                     face.event("not_understood")
                     face.set_mode("idle")

@@ -159,6 +159,13 @@ Each emotion summons its own, and only while the emotion is fresh — a face
 decorated at all times is a face saying nothing. Events can throw one directly,
 so kindness produces hearts.
 
+Each emotion also carries its own **eye colour** and **pupil size**. Colour
+reads faster than shape — annoyed goes warm orange, sad a deep blue, pleading
+pink, scared a pale lavender — and it blends rather than switches, so a mood
+settles over the face. Pupil size follows manga too: tiny pupils in wide eyes
+for shock and fear, wide ones for pleading. It can **wink**, which is the one
+asymmetry that reads as playful rather than as a fault.
+
 There is also **blush**: two soft ovals under the outer corner of each eye,
 their opacity following the `happy` dimension. Manga uses blush for "happiness
 and cheerfulness" rather than romance, and because it tracks a decaying value
