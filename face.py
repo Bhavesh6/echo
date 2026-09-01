@@ -332,6 +332,17 @@ def clamp(v, lo=0.0, hi=1.0):
     return lo if v < lo else hi if v > hi else v
 
 
+def smooth(cur, target, rate, dt):
+    """Exponential approach that does not care about frame rate. `rate` is the
+    old per-frame lerp factor, i.e. what it would do in one frame at 60 fps.
+
+    A plain per-frame lerp silently assumes every frame is 1/60 s, so any hitch
+    changes how fast things move - which is felt as jerkiness even when no
+    frames are actually dropped."""
+    k = 1.0 - (1.0 - rate) ** max(0.0, dt * 60.0)
+    return cur + (target - cur) * k
+
+
 def _lid_curve(left, right, edge_y, h, cov_left, cov_right, from_top, bend=0.0):
     """Smoothstep curve for one eyelid, sweeping cov_left -> cov_right.
     `bend` adds coverage in the middle only (zero at both edges), arcing the
@@ -749,8 +760,8 @@ class Face:
         # That pull is what separates those two, not their near-identical shapes.
         bx = clamp(self._look_t[0] + self._motion["gaze_x"], -1, 1)
         by = clamp(self._look_t[1] + self._motion["gaze_y"], -1, 1)
-        self._look[0] = lerp(self._look[0], bx, LOOK_LERP)
-        self._look[1] = lerp(self._look[1], by, LOOK_LERP)
+        self._look[0] = smooth(self._look[0], bx, LOOK_LERP, dt)
+        self._look[1] = smooth(self._look[1], by, LOOK_LERP, dt)
 
         # Micro-saccades. Perfectly steady eyes look dead even when locked on.
         # Flick between the three points of the triangle rather than jittering
@@ -770,8 +781,8 @@ class Face:
             self._next_sacc = random.uniform(lo, hi) / min(1.6, drift)
         if self.mode == "sleeping":
             self._sacc_t = [0.0, 0.0]
-        self._sacc[0] = lerp(self._sacc[0], self._sacc_t[0], SACCADE_LERP)
-        self._sacc[1] = lerp(self._sacc[1], self._sacc_t[1], SACCADE_LERP)
+        self._sacc[0] = smooth(self._sacc[0], self._sacc_t[0], SACCADE_LERP, dt)
+        self._sacc[1] = smooth(self._sacc[1], self._sacc_t[1], SACCADE_LERP, dt)
 
     def _update_blink(self, dt):
         spec = MODES[self.mode]["blink"]
@@ -915,12 +926,13 @@ class Face:
         bf = self._blink_factor()
         _, _, g_dx, g_tilt = self._gesture_offsets()
 
-        gx = self._look[0] + self._sacc[0]
-        gy = self._look[1] + self._sacc[1]
-        # Overlapping action: the pupil gets there first, the eye follows.
-        self._hot[0] += (gx - self._hot[0]) * min(1.0, LOOK_LERP * HOTSPOT_LEAD)
-        self._hot[1] += (gy - self._hot[1]) * min(1.0, LOOK_LERP * HOTSPOT_LEAD)
-        hx, hy = self._hot
+        # The EYE only follows the slow gaze drift. Saccades belong to the
+        # pupil: in a real face the eyeball flicks inside a head that is not
+        # moving, and translating the whole eye four times a second is what
+        # made this judder.
+        gx, gy = self._look[0], self._look[1]
+        hx = clamp(gx + self._sacc[0], -1.0, 1.0)
+        hy = clamp(gy + self._sacc[1], -1.0, 1.0)
         look_x = gx * gap * LOOK_RANGE_X + g_dx * base_w
         look_y = gy * base_h * LOOK_RANGE_Y * 0.5
 
