@@ -278,10 +278,24 @@ MIN_SLEEP = 30.0               # never wake purely on debt sooner than this
 
 # gaze
 LOOK_LERP = 0.05
-LOOK_RANGE_X = 0.55
-LOOK_RANGE_Y = 0.35
-SACCADE_EVERY = (0.4, 1.6)     # micro-jitter even while holding eye contact
-SACCADE_MAG = 0.05
+LOOK_RANGE_X = 0.34      # how far a full look actually travels. Was 0.55,
+                         # which let idle drift far enough to look aimless.
+LOOK_RANGE_Y = 0.26
+# Saccades, per Disney Research: the eyes flick between three points forming a
+# triangle on the face being looked at - their two eyes and their nose - at
+# random intervals of 0.1 to 0.5 s. Small, fast and structured, which is what
+# separates "alive" from "wandering aimlessly".
+SACCADE_EVERY = (0.10, 0.50)
+SACCADE_MAG = 0.075          # how wide that triangle is, in look units
+SACCADE_POINTS = ((-1.0, -0.35),   # their left eye
+                  (1.0, -0.35),    # their right eye
+                  (0.0, 0.75))     # their nose
+SACCADE_LERP = 0.55          # flick speed: a saccade is near-instant
+
+# Overlapping action: the pupil reaches the new position before the eye body
+# does, the way the eyes lead the head. Cheap, and it stops movement looking
+# like one rigid slab.
+HOTSPOT_LEAD = 2.4
 
 # one-shot "get in" gestures
 GESTURES = {
@@ -302,8 +316,10 @@ ANTICIPATION_TIME = 0.07
 # Asymmetry: the eye nearer the look direction grows, the far one shrinks -
 # real Cozmo does this on every saccade. Plus a permanent hair of difference
 # between the two eyes, because perfectly identical eyes read as stiff.
-CURIOUS_GAIN = 0.09
-EYE_IMBALANCE = 0.985
+# Subtle. At 0.09 the two eyes were visibly different sizes, which reads as a
+# mistake rather than as one being nearer.
+CURIOUS_GAIN = 0.045
+EYE_IMBALANCE = 0.992
 
 LID_CURVE_STEPS = 16
 
@@ -495,7 +511,10 @@ class Face:
         self._look_t = [0.0, 0.0]
         self._next_look = random.uniform(*ACTIVITY_HOLD)
         self._sacc = [0.0, 0.0]
+        self._sacc_t = [0.0, 0.0]
+        self._sacc_i = 0
         self._next_sacc = random.uniform(*SACCADE_EVERY)
+        self._hot = [0.0, 0.0]
 
         self._zzz = []              # floating sleep marks
         self._next_zzz = 0.8
@@ -698,18 +717,29 @@ class Face:
             self._next_look -= dt
             if self._next_look <= 0:
                 if self.activity == "drifting":
-                    self._look_t = [random.uniform(-1, 1), random.uniform(-1, 1)]
-                    self._next_look = random.uniform(2.5, 5.0)
+                    self._look_t = [random.uniform(-0.7, 0.7),
+                                    random.uniform(-0.5, 0.5)]
+                    self._next_look = random.uniform(3.0, 6.0)
                 elif self.activity == "dozing":
                     self._look_t = [random.uniform(-0.25, 0.25), random.uniform(0.2, 0.7)]
                     self._next_look = random.uniform(4.0, 8.0)
-                else:  # observing - small, frequent, close-in glances
-                    self._look_t = [random.uniform(-0.5, 0.5), random.uniform(-0.4, 0.4)]
-                    self._next_look = random.uniform(1.4, 3.2)
+                else:  # observing - small, close-in glances
+                    self._look_t = [random.uniform(-0.35, 0.35),
+                                    random.uniform(-0.25, 0.25)]
+                    self._next_look = random.uniform(2.0, 4.0)
         elif style == "avert":
-            # look up and away while thinking, then hold it
-            if abs(self._look_t[0]) < 0.3:
-                self._look_t = [random.choice((-1, 1)) * random.uniform(0.45, 0.75), -0.5]
+            # Thinking looks away and then back, in a rhythm. Holding a single
+            # off-centre stare for the whole think reads as broken, not
+            # thoughtful - and it never returns your gaze.
+            self._next_look -= dt
+            if self._next_look <= 0:
+                if abs(self._look_t[0]) > 0.15:
+                    self._look_t = [random.uniform(-0.08, 0.08), -0.05]
+                    self._next_look = random.uniform(0.7, 1.3)
+                else:
+                    self._look_t = [random.choice((-1, 1))
+                                    * random.uniform(0.20, 0.34), -0.22]
+                    self._next_look = random.uniform(0.5, 0.9)
         elif style == "lock":
             self._look_t = [0.0, 0.0]
         elif style == "still":
@@ -723,15 +753,25 @@ class Face:
         self._look[1] = lerp(self._look[1], by, LOOK_LERP)
 
         # Micro-saccades. Perfectly steady eyes look dead even when locked on.
+        # Flick between the three points of the triangle rather than jittering
+        # to a new random spot each time - a real saccade lands somewhere, it
+        # does not wander.
         drift = max(0.15, self._motion["drift"])
         self._next_sacc -= dt
         if self._next_sacc <= 0 and self.mode != "sleeping":
-            mag = SACCADE_MAG * drift
-            self._sacc = [random.uniform(-1, 1) * mag, random.uniform(-1, 1) * mag]
+            nxt = random.randrange(len(SACCADE_POINTS))
+            if nxt == self._sacc_i:                    # always actually move
+                nxt = (nxt + 1) % len(SACCADE_POINTS)
+            self._sacc_i = nxt
+            px, py = SACCADE_POINTS[nxt]
+            mag = SACCADE_MAG * min(1.6, drift)
+            self._sacc_t = [px * mag, py * mag]
             lo, hi = SACCADE_EVERY
-            self._next_sacc = random.uniform(lo / drift, hi / drift)
-        self._sacc[0] *= 0.90
-        self._sacc[1] *= 0.90
+            self._next_sacc = random.uniform(lo, hi) / min(1.6, drift)
+        if self.mode == "sleeping":
+            self._sacc_t = [0.0, 0.0]
+        self._sacc[0] = lerp(self._sacc[0], self._sacc_t[0], SACCADE_LERP)
+        self._sacc[1] = lerp(self._sacc[1], self._sacc_t[1], SACCADE_LERP)
 
     def _update_blink(self, dt):
         spec = MODES[self.mode]["blink"]
@@ -877,6 +917,10 @@ class Face:
 
         gx = self._look[0] + self._sacc[0]
         gy = self._look[1] + self._sacc[1]
+        # Overlapping action: the pupil gets there first, the eye follows.
+        self._hot[0] += (gx - self._hot[0]) * min(1.0, LOOK_LERP * HOTSPOT_LEAD)
+        self._hot[1] += (gy - self._hot[1]) * min(1.0, LOOK_LERP * HOTSPOT_LEAD)
+        hx, hy = self._hot
         look_x = gx * gap * LOOK_RANGE_X + g_dx * base_w
         look_y = gy * base_h * LOOK_RANGE_Y * 0.5
 
@@ -906,10 +950,10 @@ class Face:
 
         tilt = g_tilt * base_h
         self.left.draw(surf, W * 0.5 - gap + look_x, cy + look_y + breathe - tilt,
-                       base_w * lm, base_h * lm, bf, self._hotspot, gx, gy, tint,
+                       base_w * lm, base_h * lm, bf, self._hotspot, hx, hy, tint,
                        self._vgrad)
         self.right.draw(surf, W * 0.5 + gap + look_x, cy + look_y + breathe + tilt,
-                        base_w * rm, base_h * rm, bf, self._hotspot, gx, gy, tint,
+                        base_w * rm, base_h * rm, bf, self._hotspot, hx, hy, tint,
                         self._vgrad)
 
         self._draw_zzz(surf, W, H, gap)
