@@ -174,6 +174,23 @@ class Brain:
         self.chat_model = chat_model or self.pick_model()
         self.history = history
         self.turns = []
+        # Long-term memory injects itself here; brain.py never needs to
+        # know what a Memory is.
+        self.context = ""
+
+    def raw(self, prompt, max_tokens=600):
+        """A plain completion with no companion persona - for background
+        jobs like folding a conversation into memory, where an emotion tag
+        and a two-sentence limit would be actively unhelpful."""
+        kw = dict(model=self.chat_model, max_tokens=max_tokens,
+                  temperature=0.2,
+                  messages=[{"role": "user", "content": prompt}])
+        try:
+            r = self.client.chat.completions.create(
+                reasoning_effort="low", **kw)
+        except Exception:
+            r = self.client.chat.completions.create(**kw)
+        return (r.choices[0].message.content or "").strip()
 
     def pick_model(self):
         """Ask the account what it can actually use, rather than hardcoding an
@@ -211,7 +228,8 @@ class Brain:
 
     def reply(self, text):
         """Returns (spoken_text, emotion). Emotion is always one the face has."""
-        msgs = [{"role": "system", "content": SYSTEM + "\n" + self.now_line()}]
+        msgs = [{"role": "system",
+                 "content": SYSTEM + "\n" + self.now_line() + self.context}]
         msgs += self.turns[-self.history * 2:]
         msgs.append({"role": "user", "content": text})
         # gpt-oss models spend tokens on internal reasoning before answering.
@@ -288,7 +306,8 @@ class GeminiBrain(Brain):
 
         body = json.dumps({
             "contents": contents,
-            "systemInstruction": {"parts": [{"text": SYSTEM + "\n" + self.now_line()}]},
+            "systemInstruction": {"parts": [{
+                "text": SYSTEM + "\n" + self.now_line() + self.context}]},
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400},
         }).encode()
 

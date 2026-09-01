@@ -348,6 +348,7 @@ class Listener:
         self.device = device
         self.level = 0.0
         self.speaking = False
+        self.wake = None            # attach a WakeWord to gate on a phrase
         self.floor = 0.004
         self.threshold = VAD_ABS_MIN
         self.sensitivity = 1.0      # >1 = harder to trigger, <1 = easier.
@@ -367,6 +368,8 @@ class Listener:
 
     def _callback(self, indata, frames, time_info, status):
         block = indata[:, 0].copy()
+        if self.wake is not None and not self.muted:
+            self.wake.feed(block)
         rms = float(np.sqrt(np.mean(block ** 2)))
         was_speaking = self.speaking
         if self.muted:
@@ -427,3 +430,70 @@ class Listener:
             self.stream.stop(); self.stream.close()
         except Exception:
             pass
+
+
+# ------------------------------------------------------------- wake word
+# Anki put trigger-word detection at priority 2 in Vector's behaviour tree -
+# only physical safety outranked hearing its name. Without it a companion
+# reacts to the television, to other people, to you muttering at your desk.
+WAKE_PHRASE = "hey_jarvis"   # also: alexa, hey_mycroft, hey_rhasspy
+WAKE_THRESHOLD = 0.5         # 0..1. Lower = easier to trigger, more false ones
+WAKE_FRAME = 1280            # samples openWakeWord expects (80 ms at 16 kHz)
+WAKE_COOLDOWN = 2.0          # seconds before it can fire again
+
+
+class WakeWord:
+    """Listens for a spoken trigger phrase. Fed from the mic callback, but all
+    the work happens on a worker thread so the audio path stays cheap."""
+
+    def __init__(self, phrase=None, threshold=None, framework="onnx"):
+        from openwakeword.model import Model
+        self.phrase = phrase or find_api_key("WAKE_PHRASE") or WAKE_PHRASE
+        self.threshold = float(find_api_key("WAKE_THRESHOLD")
+                               or threshold or WAKE_THRESHOLD)
+        self.model = Model(wakeword_models=[self.phrase],
+                           inference_framework=framework)
+        self.score = 0.0
+        self.enabled = True
+        self._pending = False
+        self._last = 0.0
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._q = queue.Queue(maxsize=64)
+        self._lock = threading.Lock()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def feed(self, block):
+        """Called from the audio callback. Must stay cheap - just buffer."""
+        if not self.enabled:
+            return
+        try:
+            self._q.put_nowait(block)
+        except queue.Full:
+            pass          # dropping a frame is better than stalling audio
+
+    def _worker(self):
+        import time as _t
+        while True:
+            block = self._q.get()
+            self._buf = np.concatenate([self._buf, block])
+            while len(self._buf) >= WAKE_FRAME:
+                frame = self._buf[:WAKE_FRAME]
+                self._buf = self._buf[WAKE_FRAME:]
+                pcm16 = (np.clip(frame, -1, 1) * 32767).astype(np.int16)
+                try:
+                    out = self.model.predict(pcm16)
+                except Exception:
+                    continue
+                score = float(max(out.values())) if out else 0.0
+                self.score = score
+                now = _t.time()
+                if score >= self.threshold and now - self._last > WAKE_COOLDOWN:
+                    self._last = now
+                    with self._lock:
+                        self._pending = True
+
+    def take(self):
+        """True once per detection."""
+        with self._lock:
+            hit, self._pending = self._pending, False
+        return hit

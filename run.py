@@ -22,6 +22,7 @@ Keys
              N startled    M want
   speech     V speak a line   C stop speaking
   mic        M mute/unmute   [ more sensitive   ] less sensitive
+  wake       L  turn the wake word off/on (open mic)
 
   other      SPACE blink   TAB demo on/off    I info overlay
              O fullscreen  ESC quit
@@ -87,6 +88,12 @@ try:
 except Exception as _e:                      # keep the face usable without audio
     voice_mod = None
     print("voice disabled (%s)" % _e)
+
+try:
+    import memory as memory_mod
+except Exception as _e:
+    memory_mod = None
+    print("memory disabled (%s)" % _e)
 
 try:
     import brain as brain_mod
@@ -205,6 +212,12 @@ class DemoDriver:
         self.wait = max(0.05, self.SCRIPT[self.i][0] * random.uniform(0.85, 1.15))
 
 
+# How long the conversation stays open after the wake phrase, refreshed by
+# every exchange. Long enough for a back-and-forth without repeating yourself,
+# short enough that it stops listening when you walk away.
+AWAKE_WINDOW = 30.0
+MEMORY_EVERY = 3          # exchanges between memory updates
+
 LINES = [
     "Hello. I am your companion.",
     "I am listening. What would you like to talk about?",
@@ -229,6 +242,17 @@ EVENT_KEYS = {
 }
 
 
+def _remember(mem, brain):
+    """Fold the conversation into long-term memory, off the render thread."""
+    try:
+        if mem.update(brain, brain.turns):
+            brain.context = mem.context()
+            log("memory updated: name=%s facts=%d"
+                % (mem.data.get("name"), len(mem.data.get("facts", []))))
+    except Exception as e:
+        log("memory update failed: %s" % e)
+
+
 def sd_name(idx):
     try:
         import sounddevice as sd
@@ -238,7 +262,8 @@ def sd_name(idx):
 
 
 def draw_hud(screen, font, face, demo_on, voice_label="-", level=0.0,
-             mic=0.0, hearing=False, thresh=0.0, sens=1.0, heard_text=""):
+             mic=0.0, hearing=False, thresh=0.0, sens=1.0, heard_text="",
+             wake_state="-"):
     lines = [
         "mode      %s" % face.mode,
         "emotion   %s" % face.emotion,
@@ -259,6 +284,7 @@ def draw_hud(screen, font, face, demo_on, voice_label="-", level=0.0,
         "mic thres %.3f" % thresh,
         "heard     %s" % (heard_text[:22] if heard_text else "-"),
         "sensitiv. %.2f  [ easier  ] harder" % sens,
+        "wake      %s" % wake_state,
     ]
     y = 10
     for line in lines:
@@ -299,13 +325,35 @@ def main():
             print("mic: %s" % (sd_name(dev) if dev is not None else "system default"))
         except Exception as e:
             print("mic unavailable: %s" % e)
+    if listener is not None and voice_mod is not None:
+        try:
+            wake = voice_mod.WakeWord()
+            listener.wake = wake
+            print("wake word: say '%s' to start talking to it"
+                  % wake.phrase.replace("_", " "))
+        except Exception as e:
+            print("wake word unavailable (%s) - it will answer any speech" % e)
     heard = False
     peak = 0.0
+    wake = None
+    awake_until = 0.0
+    wake_gate = True
+    mem = None
+    if memory_mod is not None:
+        mem = memory_mod.Memory()
+        away = mem.start_session()
+        log("memory: name=%s facts=%d sessions=%d away=%s"
+            % (mem.data.get("name"), len(mem.data.get("facts", [])),
+               mem.data.get("sessions"),
+               "first meeting" if away is None else "%.1fh" % away))
+    exchanges = 0
     convo = None
     if brain_mod is not None and voice_mod is not None:
         try:
             b = brain_mod.best_brain()
             convo = Conversation(b)
+            if mem is not None:
+                b.context = mem.context()
             print("brain: %s | stt=%s chat=%s"
                   % (type(b).__name__, brain_mod.STT_MODEL, b.chat_model))
         except Exception as e:
@@ -357,6 +405,9 @@ def main():
                 elif k == pygame.K_m and listener is not None:
                     listener.muted = not listener.muted
                     log("mic %s" % ("MUTED" if listener.muted else "live"))
+                elif k == pygame.K_l:
+                    wake_gate = not wake_gate
+                    log("wake gate %s" % ("ON" if wake_gate else "OFF - open mic"))
                 elif k == pygame.K_SPACE:
                     face.blink()
                 elif k == pygame.K_TAB:
@@ -375,6 +426,15 @@ def main():
         # Poll the speaker from THIS thread; never let the TTS worker touch
         # the face. The level is read every frame straight from the playback
         # callback, so the eyes move with the audio rather than ahead of it.
+        now = time.time()
+        if wake is not None and wake.take():
+            log("wake word heard")
+            face.event("wake_word")          # perk + surprise, as Vector did
+            face.set_mode("listening")
+            awake_until = now + AWAKE_WINDOW
+            demo_on = False
+        awake = (wake is None) or (not wake_gate) or (now < awake_until)
+
         talking = speaker is not None and speaker.busy
         if listener is not None:
             # No echo cancellation without a speaker in the ReSpeaker's own
@@ -391,7 +451,14 @@ def main():
 
         if listener is not None and not talking:
             peak = max(peak, listener.level)
-            if listener.speaking:
+            if listener.speaking and not awake:
+                # It hears the room but has not been addressed. Stimulation
+                # rises - it notices - but it does not interrupt.
+                if not heard:
+                    heard = True
+                    face.event("sound")
+                listener.take_utterance()    # discard, do not transcribe
+            elif listener.speaking:
                 if not heard:
                     heard = True
                     peak = listener.level
@@ -400,6 +467,9 @@ def main():
                     log("HEARD YOU - speech started")
                 face.set_mode("listening")
                 face.set_amplitude(listener.level)
+            elif heard and not awake:
+                heard = False
+                face.set_amplitude(0.0)
             elif heard:
                 heard = False
                 log("speech ended (peak level %.2f)" % peak)
@@ -425,6 +495,11 @@ def main():
             else:
                 if kind == "reply":
                     last_heard, reply, emotion = payload
+                    awake_until = time.time() + AWAKE_WINDOW
+                    exchanges += 1
+                    if mem is not None and exchanges % MEMORY_EVERY == 0:
+                        threading.Thread(
+                            target=_remember, args=(mem, b), daemon=True).start()
                     face.set_emotion(emotion)
                     face.event("understood")
                     if speaker is not None:
@@ -448,9 +523,15 @@ def main():
                      bool(listener and listener.speaking),
                      listener.threshold if listener else 0.0,
                      listener.sensitivity if listener else 1.0,
-                     last_heard)
+                     last_heard,
+                     ("off (open mic)" if not wake_gate else
+                      "AWAKE %.0fs" % max(0, awake_until - time.time())
+                      if awake else "asleep - say the phrase"))
         pygame.display.flip()
 
+    if mem is not None and speaker is not None and exchanges:
+        log("saving memory before exit...")
+        _remember(mem, b)
     log("--- closed ---")
     pygame.quit()
     sys.exit(0)
