@@ -216,20 +216,20 @@ EVENTS = {
     "understood":     dict(stim=+0.10, confident=+0.12),
     # "I heard you but did not get it" deserves its own reaction. Most hobby
     # assistants have nothing here, and it is the moment they feel most robotic.
-    "not_understood": dict(stim=+0.05, confident=-0.18, emotion="curious", gesture="tilt"),
+    "not_understood": dict(stim=+0.05, confident=-0.18, emotion="curious", gesture="tilt", symbol="question"),
     # --- social. Vector had a separately authored behaviour for each of these.
     "greeting":       dict(stim=+0.40, social=+0.30, happy=+0.20, emotion="happy", gesture="perk"),
-    "compliment":     dict(stim=+0.20, social=+0.25, happy=+0.45, emotion="happy", gesture="bounce"),
-    "affection":      dict(stim=+0.25, social=+0.35, happy=+0.55, emotion="happy", gesture="bounce"),
+    "compliment":     dict(stim=+0.20, social=+0.25, happy=+0.45, emotion="happy", gesture="bounce", symbol="sparkle"),
+    "affection":      dict(stim=+0.25, social=+0.35, happy=+0.55, emotion="happy", gesture="bounce", symbol="heart"),
     "apology":        dict(social=+0.15, happy=+0.20, emotion="happy"),
-    "abuse":          dict(stim=+0.20, happy=-0.45, confident=-0.20, emotion="sad"),
-    "startled":       dict(stim=+0.75, confident=-0.25, emotion="scared", gesture="perk"),
+    "abuse":          dict(stim=+0.20, happy=-0.45, confident=-0.20, emotion="sad", symbol="tear"),
+    "startled":       dict(stim=+0.75, confident=-0.25, emotion="scared", gesture="perk", symbol="exclaim"),
     "want":           dict(social=+0.30, happy=+0.10, emotion="pleading"),
     "goodbye":        dict(social=-0.20, happy=-0.10, emotion="sad"),
-    "long_absence":   dict(stim=+0.80, social=+0.50, happy=+0.45, emotion="happy", gesture="bounce"),
+    "long_absence":   dict(stim=+0.80, social=+0.50, happy=+0.45, emotion="happy", gesture="bounce", symbol="heart"),
     # --- ambient
     "sound":          dict(stim=+0.18),
-    "touch":          dict(stim=+0.30, social=+0.20, happy=+0.25, emotion="happy"),
+    "touch":          dict(stim=+0.30, social=+0.20, happy=+0.25, emotion="happy", symbol="heart"),
 }
 
 # Dimensions decay toward a baseline. Vector uses a per-event XY decay graph;
@@ -266,14 +266,53 @@ SLEEP_STIM_GATE = 0.16
 SLEEP_BREATHE_RATE = 0.35     # of the waking rate
 SLEEP_BREATHE_DEPTH = 2.2     # of the waking amplitude
 
-# Floating Z's. Drawn as three strokes, so no font is needed and they scale
+# ----------------------------------------------------------- decoration
+# Manga iconography ("manpu") - the settled visual shorthand for emotion that
+# every companion robot borrows. Drawn as strokes: no fonts, no assets, scales
 # with the window.
-ZZZ_EVERY = 2.4               # seconds between them
-ZZZ_LIFE = 4.0                # seconds to rise and fade
-ZZZ_RISE = 0.30               # of window height
-ZZZ_DRIFT = 0.10              # sideways wander, of window width
-ZZZ_SIZE = 0.055              # of window height at birth
-ZZZ_GROW = 1.9                # size multiplier by the end
+SYMBOL_LIFE = 2.6             # seconds to rise and fade
+SYMBOL_RISE = 0.26            # of window height
+SYMBOL_DRIFT = 0.09           # sideways wander, of window width
+SYMBOL_SIZE = 0.055           # of window height at birth
+SYMBOL_GROW = 1.7             # size multiplier by the end
+SYMBOL_EVERY = (2.2, 4.2)     # gap between symbols while one is called for
+
+# Which symbol belongs to which feeling. None = show nothing, which matters:
+# a face decorated at all times is a face saying nothing.
+EMOTION_SYMBOL = {
+    "neutral": None,
+    "happy": "sparkle",
+    "sad": "tear",
+    "curious": "question",
+    "surprised": "exclaim",
+    "annoyed": "vein",
+    "sleepy": "zzz",
+    "pleading": "heart",
+    "scared": "sweat",
+}
+
+SYMBOL_COLOR = {
+    "heart": (255, 110, 150),
+    "sparkle": (255, 240, 170),
+    "sweat": (150, 220, 255),
+    "tear": (150, 220, 255),
+    "vein": (255, 90, 90),
+    "question": (255, 240, 170),
+    "exclaim": (255, 240, 170),
+    "note": (190, 230, 255),
+    "zzz": EYE_COLOR,
+}
+
+# Blush. Manga uses pink ovals on the cheeks for "happiness and cheerfulness",
+# not romance. Here its opacity follows the happy dimension, so warmth is
+# ambient and earned rather than an event that fires.
+BLUSH_COLOR = (255, 120, 165)
+BLUSH_ALPHA = 118             # at full happiness
+BLUSH_W = 0.10                # of window width
+BLUSH_H = 0.058               # of window height - rounder than a flat smear
+BLUSH_DROP = 0.165            # below the eye centre. Sitting far below reads
+                              # as a stain on the screen rather than cheeks.
+BLUSH_OUT = 0.35              # pushed outward from each eye, as cheeks are
 MIN_SLEEP = 30.0               # never wake purely on debt sooner than this
 
 # gaze
@@ -446,6 +485,21 @@ def _build_vgrad(steps=256):
     return surf
 
 
+def _build_blush(w, h):
+    """A soft-edged oval. Concentric ellipses rather than a flat shape, or it
+    reads as a sticker stuck on the face."""
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    steps = 22
+    for i in range(steps, 0, -1):
+        f = i / steps
+        a = int(255 * (1.0 - f) ** 1.6)
+        rect = pygame.Rect(0, 0, max(1, int(w * f)), max(1, int(h * f)))
+        rect.center = (w // 2, h // 2)
+        pygame.draw.ellipse(surf, (BLUSH_COLOR[0], BLUSH_COLOR[1],
+                                   BLUSH_COLOR[2], a), rect)
+    return surf
+
+
 def _build_scanlines(w, h):
     surf = pygame.Surface((w, h), pygame.SRCALPHA)
     for y in range(0, h, SCANLINE_STEP):
@@ -582,8 +636,8 @@ class Face:
         self._next_sacc = random.uniform(*SACCADE_EVERY)
         self._hot = [0.0, 0.0]
 
-        self._zzz = []              # floating sleep marks
-        self._next_zzz = 0.8
+        self._symbols = []          # floating manpu
+        self._next_symbol = 1.2
         self.activity = "observing"
         self._next_activity = random.uniform(*ACTIVITY_HOLD)
         self.sleep_pressure = 0.0
@@ -602,6 +656,7 @@ class Face:
         self._vgrad = None
         self._scanlines = None
         self._scan_for = (0, 0)
+        self._blush = None
 
     # ------------------------------------------------------------- controls
     def set_mode(self, mode):
@@ -674,6 +729,8 @@ class Face:
             self.set_emotion(spec["emotion"])
         if "gesture" in spec and scale > 0.3:
             self.gesture(spec["gesture"])
+        if "symbol" in spec and scale > 0.3:
+            self.symbol(spec["symbol"])
         if self.mode == "sleeping" and self.dims["stim"] > SLEEP_STIM_GATE:
             self.set_mode("idle")
 
@@ -700,7 +757,7 @@ class Face:
 
         self._emotion_age += dt
         self._blend_motion(dt)
-        self._update_zzz(dt)
+        self._update_symbols(dt)
         if self._gesture is not None:
             self._gesture_t += dt
             if self._gesture_t >= GESTURES[self._gesture]["dur"]:
@@ -712,20 +769,39 @@ class Face:
         self.left.update(dt, self._motion["freq"], self._motion["zeta"])
         self.right.update(dt, self._motion["freq"], self._motion["zeta"])
 
-    def _update_zzz(self, dt):
-        """Spawn and age the floating Z's. Only while actually asleep."""
-        for z in self._zzz:
-            z["t"] += dt
-        self._zzz = [z for z in self._zzz if z["t"] < ZZZ_LIFE]
-        if self.mode != "sleeping":
-            self._next_zzz = 0.8
+    def symbol(self, kind):
+        """Throw one manpu symbol. Drivers can call this directly for a
+        one-off, e.g. a heart when someone says something kind."""
+        if kind not in SYMBOL_COLOR:
             return
-        self._next_zzz -= dt
-        if self._next_zzz <= 0:
-            self._next_zzz = ZZZ_EVERY * random.uniform(0.85, 1.15)
-            self._zzz.append({"t": 0.0,
+        self._symbols.append({"kind": kind, "t": 0.0,
+                              "side": random.choice((-1, 1)),
                               "sway": random.uniform(-1.0, 1.0),
-                              "tilt": random.uniform(-0.25, 0.25)})
+                              "tilt": random.uniform(-0.22, 0.22)})
+
+    def _wanted_symbol(self):
+        """Sleeping always yawns Z's; otherwise the current emotion decides,
+        and only while the emotion is fresh - a permanently decorated face
+        stops meaning anything."""
+        if self.mode == "sleeping":
+            return "zzz"
+        if self._emotion_age > EMOTION_HOLD:
+            return None
+        return EMOTION_SYMBOL.get(self.emotion)
+
+    def _update_symbols(self, dt):
+        for z in self._symbols:
+            z["t"] += dt
+        self._symbols = [z for z in self._symbols if z["t"] < SYMBOL_LIFE]
+        want = self._wanted_symbol()
+        if want is None:
+            self._next_symbol = 0.5
+            return
+        self._next_symbol -= dt
+        if self._next_symbol <= 0:
+            lo, hi = SYMBOL_EVERY
+            self._next_symbol = random.uniform(lo, hi)
+            self.symbol(want)
 
     def _blend_motion(self, dt):
         """Ease the motion signature toward the current emotion's. The spring
@@ -1073,25 +1149,116 @@ class Face:
                         base_w * rm, base_h * rm, bf, self._hotspot, hx, hy, tint,
                         self._vgrad)
 
-        self._draw_zzz(surf, W, H, gap)
+        self._draw_blush(surf, W, H, gap, cy + look_y + breathe)
+        self._draw_symbols(surf, W, H, gap)
 
         if SCANLINE_ALPHA > 0:
             surf.blit(self._scanlines, (0, 0))
 
-    def _draw_zzz(self, surf, W, H, gap):
-        """Z's rising from beside the right eye, growing and fading."""
-        if not self._zzz:
+    def _draw_blush(self, surf, W, H, gap, eye_cy):
+        """Two soft ovals under the eyes. Opacity follows how happy it is, so
+        this is ambient warmth rather than an effect that fires."""
+        warmth = clamp((self.dims["happy"] - 0.35) / 0.55)
+        if self.emotion in ("happy", "pleading"):
+            warmth = max(warmth, 0.55)
+        if self.mode == "sleeping":
+            warmth *= 0.5
+        if warmth < 0.03:
             return
-        for z in self._zzz:
-            p = z["t"] / ZZZ_LIFE
-            # fade in quickly, then out over the rest of the life
-            alpha = min(1.0, p / 0.15) * (1.0 - p) ** 1.4
+        bw, bh = int(W * BLUSH_W), int(H * BLUSH_H)
+        if bw < 2 or bh < 2:
+            return
+        if self._blush is None or self._blush.get_size() != (bw, bh):
+            self._blush = _build_blush(bw, bh)
+        tmp = self._blush.copy()
+        tmp.set_alpha(int(BLUSH_ALPHA * warmth))
+        y = int(eye_cy + H * BLUSH_DROP)
+        for side in (-1, 1):
+            x = int(W * 0.5 + side * gap * (1.0 + BLUSH_OUT))
+            surf.blit(tmp, tmp.get_rect(center=(x, y)))
+
+    def _draw_symbols(self, surf, W, H, gap):
+        if not self._symbols:
+            return
+        for z in self._symbols:
+            p = z["t"] / SYMBOL_LIFE
+            alpha = min(1.0, p / 0.12) * (1.0 - p) ** 1.4
             if alpha <= 0.01:
                 continue
-            size = H * ZZZ_SIZE * (1.0 + (ZZZ_GROW - 1.0) * p)
-            cx = W * 0.5 + gap * 1.5 + z["sway"] * W * ZZZ_DRIFT * p
-            cy = H * 0.42 - p * H * ZZZ_RISE
-            self._blit_z(surf, cx, cy, size, alpha, z["tilt"])
+            size = H * SYMBOL_SIZE * (1.0 + (SYMBOL_GROW - 1.0) * p)
+            fall = z["kind"] == "tear"
+            cx = W * 0.5 + z["side"] * gap * 1.45 + z["sway"] * W * SYMBOL_DRIFT * p
+            cy = H * 0.40 + (p * H * SYMBOL_RISE if fall else -p * H * SYMBOL_RISE)
+            self._blit_symbol(surf, z["kind"], cx, cy, size, alpha, z["tilt"])
+
+    @staticmethod
+    def _blit_symbol(surf, kind, cx, cy, size, alpha, tilt):
+        box = int(size * 3) + 8
+        tmp = pygame.Surface((box, box), pygame.SRCALPHA)
+        ox = oy = box / 2
+        r, g, b = SYMBOL_COLOR.get(kind, EYE_COLOR)
+        col = (r, g, b, max(0, min(255, int(255 * alpha))))
+        t = max(2, int(size * 0.16))
+        h = size
+        w = size * 0.78
+
+        if kind == "zzz":
+            for a, b2 in (((ox - w / 2, oy - h / 2), (ox + w / 2, oy - h / 2)),
+                          ((ox + w / 2, oy - h / 2), (ox - w / 2, oy + h / 2)),
+                          ((ox - w / 2, oy + h / 2), (ox + w / 2, oy + h / 2))):
+                pygame.draw.line(tmp, col, a, b2, t)
+        elif kind == "heart":
+            rr = h * 0.28
+            pygame.draw.circle(tmp, col, (int(ox - rr * 0.72), int(oy - rr * 0.45)), int(rr))
+            pygame.draw.circle(tmp, col, (int(ox + rr * 0.72), int(oy - rr * 0.45)), int(rr))
+            pygame.draw.polygon(tmp, col, [(ox - rr * 1.55, oy - rr * 0.2),
+                                           (ox + rr * 1.55, oy - rr * 0.2),
+                                           (ox, oy + rr * 1.6)])
+        elif kind == "sparkle":
+            a = h * 0.55
+            b2 = h * 0.16
+            pygame.draw.polygon(tmp, col, [(ox, oy - a), (ox + b2, oy - b2),
+                                           (ox + a, oy), (ox + b2, oy + b2),
+                                           (ox, oy + a), (ox - b2, oy + b2),
+                                           (ox - a, oy), (ox - b2, oy - b2)])
+        elif kind in ("sweat", "tear"):
+            rr = h * 0.30
+            pygame.draw.circle(tmp, col, (int(ox), int(oy + rr * 0.45)), int(rr))
+            pygame.draw.polygon(tmp, col, [(ox - rr * 0.92, oy + rr * 0.30),
+                                           (ox + rr * 0.92, oy + rr * 0.30),
+                                           (ox, oy - rr * 1.55)])
+        elif kind == "vein":
+            # the crucifix-shaped popping vein
+            a = h * 0.42
+            for dx, dy in ((0, 1), (1, 0)):
+                pygame.draw.line(tmp, col, (ox - a * dx, oy - a * dy),
+                                 (ox + a * dx, oy + a * dy), t + 1)
+            for sx in (-1, 1):
+                pygame.draw.line(tmp, col, (ox + sx * a * 0.55, oy - a * 0.55),
+                                 (ox + sx * a * 0.95, oy - a * 0.95), t)
+        elif kind == "question":
+            pts = []
+            for i in range(11):
+                ang = math.pi * (1.15 - 1.35 * i / 10.0)
+                pts.append((ox + math.cos(ang) * h * 0.30,
+                            oy - h * 0.22 - math.sin(ang) * h * 0.30))
+            pts.append((ox + h * 0.02, oy + h * 0.16))
+            pygame.draw.lines(tmp, col, False, pts, t)
+            pygame.draw.circle(tmp, col, (int(ox + h * 0.02), int(oy + h * 0.44)), t)
+        elif kind == "exclaim":
+            pygame.draw.line(tmp, col, (ox, oy - h * 0.50), (ox, oy + h * 0.14), t + 1)
+            pygame.draw.circle(tmp, col, (int(ox), int(oy + h * 0.44)), t)
+        elif kind == "note":
+            pygame.draw.circle(tmp, col, (int(ox - h * 0.16), int(oy + h * 0.34)),
+                               int(h * 0.20))
+            pygame.draw.line(tmp, col, (ox + h * 0.02, oy + h * 0.34),
+                             (ox + h * 0.02, oy - h * 0.44), t)
+            pygame.draw.line(tmp, col, (ox + h * 0.02, oy - h * 0.44),
+                             (ox + h * 0.34, oy - h * 0.26), t)
+
+        if abs(tilt) > 0.01:
+            tmp = pygame.transform.rotate(tmp, tilt * 40.0)
+        surf.blit(tmp, tmp.get_rect(center=(int(cx), int(cy))))
 
     @staticmethod
     def _blit_z(surf, cx, cy, size, alpha, tilt):

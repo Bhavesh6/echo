@@ -136,6 +136,38 @@ keyboard, the scripted demo and the real voice loop all drive it identically.
 - The emotion tag must be chosen for *the reply about to be given*, not the
   user's message — otherwise refusals arrive wearing a happy face.
 
+## What else is on the screen
+
+Two eyes on black is not what real companion robots show. LOOI floats hearts,
+EMO shows weather icons and winks, FluxGarage's RoboEyes has animated sweat
+drops. They all borrow the same settled visual shorthand — manga iconography,
+*manpu* — which reads instantly without words:
+
+| symbol | meaning |
+|---|---|
+| sparkle | amazement, delight |
+| heart | affection |
+| sweat drop | embarrassment, pressure, confusion |
+| popping vein | anger or annoyance (the crucifix shape) |
+| tear | sadness |
+| question mark | did not understand |
+| exclamation | alarm, realisation |
+| music note | pleased, humming along |
+| Z | asleep |
+
+Each emotion summons its own, and only while the emotion is fresh — a face
+decorated at all times is a face saying nothing. Events can throw one directly,
+so kindness produces hearts.
+
+There is also **blush**: two soft ovals under the outer corner of each eye,
+their opacity following the `happy` dimension. Manga uses blush for "happiness
+and cheerfulness" rather than romance, and because it tracks a decaying value
+rather than firing on an event, the warmth is ambient and earned. It is the
+cheapest large gain in friendliness available.
+
+Everything is drawn as strokes and shapes — no fonts, no image assets, and it
+all scales with the window.
+
 ## Wake word
 
 `openWakeWord`, running locally on the CPU — no key, no network, nothing
