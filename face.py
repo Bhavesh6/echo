@@ -80,7 +80,10 @@ EMOTION_TINT = {
     "pleading": (255, 175, 215),
     "scared": (200, 210, 255),
 }
-TINT_LERP = 0.9          # per-second approach to the emotion's colour
+TINT_LERP = 0.10         # per-frame approach to the emotion's colour. NOTE:
+                         # smooth() already accounts for dt - scaling this by
+                         # dt as well pushed it past 1.0 on a long frame and
+                         # crashed on a complex exponentiation.
 
 WINK_DURATION = 0.30
 
@@ -457,6 +460,7 @@ def smooth(cur, target, rate, dt):
     A plain per-frame lerp silently assumes every frame is 1/60 s, so any hitch
     changes how fast things move - which is felt as jerkiness even when no
     frames are actually dropped."""
+    rate = 0.0 if rate < 0.0 else (0.999 if rate > 0.999 else rate)
     k = 1.0 - (1.0 - rate) ** max(0.0, dt * 60.0)
     return cur + (target - cur) * k
 
@@ -863,7 +867,7 @@ class Face:
             want_c = EMOTION_TINT["neutral"]
         self._pupil = smooth(self._pupil, want_p, 0.10, dt)
         for i in range(3):
-            self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP * dt * 6, dt)
+            self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP, dt)
         if self._wink is not None:
             self._wink[1] += dt
             if self._wink[1] >= WINK_DURATION:
