@@ -87,6 +87,55 @@ TINT_LERP = 0.10         # per-frame approach to the emotion's colour. NOTE:
 
 WINK_DURATION = 0.30
 
+# ------------------------------------------------------- mouth and brows
+# Both optional: some faces are better with only eyes, and turning them off
+# should not require deleting code.
+SHOW_MOUTH = True
+SHOW_BROWS = True
+
+MOUTH_Y = 0.88           # below the eye CENTRES, as a fraction of eye height.
+                         # The eye reaches about 0.43 of that below its centre,
+                         # so anything under ~0.6 lands in the gap between the
+                         # eyes and reads as a nose rather than a mouth.
+MOUTH_W = 0.42           # width, as a fraction of the gap between eye centres
+MOUTH_T = 0.055          # stroke thickness, of window height
+MOUTH_OPEN_MAX = 0.16    # how far it opens on a loud syllable, of window height
+MOUTH_STEPS = 16         # points along the curve
+
+BROW_Y = 0.72            # above the eye centre, of eye height
+BROW_W = 0.86            # of eye width
+BROW_T = 0.055           # of window height
+
+# curve: +1 a full smile, -1 a full frown. tilt: inner end down is negative,
+# which is the angry direction, matching the eyelid rule.
+EMOTION_MOUTH = {
+    # cat: 0 a plain curve, 1 the "w" cat mouth - mischief and delight, the
+    # shape Tabbie's love animation uses at its peak.
+    "neutral":   dict(curve=0.18, w=1.00, open=0.00, cat=0.0),
+    "happy":     dict(curve=0.95, w=1.15, open=0.10, cat=0.35),
+    "sad":       dict(curve=-0.70, w=0.85, open=0.00, cat=0.0),
+    "curious":   dict(curve=0.10, w=0.80, open=0.16, cat=0.0),
+    "surprised": dict(curve=0.00, w=0.60, open=0.70, cat=0.0),
+    "annoyed":   dict(curve=-0.45, w=0.95, open=0.00, cat=0.0),
+    "sleepy":    dict(curve=-0.10, w=0.70, open=0.22, cat=0.0),
+    "pleading":  dict(curve=0.55, w=0.95, open=0.06, cat=0.85),
+    "scared":    dict(curve=-0.40, w=0.75, open=0.45, cat=0.0),
+}
+EMOTION_BROW = {
+    "neutral":   dict(tilt=0.00, lift=0.00, show=0.35),
+    "happy":     dict(tilt=0.10, lift=0.10, show=0.55),
+    "sad":       dict(tilt=0.55, lift=0.04, show=1.00),
+    "curious":   dict(tilt=0.28, lift=0.20, show=0.90),
+    "surprised": dict(tilt=0.05, lift=0.38, show=1.00),
+    "annoyed":   dict(tilt=-0.75, lift=-0.04, show=1.00),
+    "sleepy":    dict(tilt=0.30, lift=-0.10, show=0.55),
+    "pleading":  dict(tilt=0.60, lift=0.14, show=1.00),
+    "scared":    dict(tilt=0.45, lift=0.34, show=1.00),
+}
+MOUTH_KEYS = ("curve", "w", "open", "cat")
+BROW_KEYS = ("tilt", "lift", "show")
+FACE_PART_LERP = 0.12
+
 # Vector's display has a scanline opacity factor - a subtle CRT feel. Set
 # SCANLINE_ALPHA = 0 for the clean, modern look (LOOI has no scanlines).
 SCANLINE_ALPHA = 0       # 0 = off. LOOI has none; they read as cheap here.
@@ -108,6 +157,35 @@ MIN_EYE_CLEARANCE = 0.022  # eyes push apart rather than overlap when they grow
 # any aspect ratio. n=2 is a pure ellipse, n=4 is a squircle, n -> inf is a
 # rectangle.
 EYE_SUPER = 2.7
+
+# Heart eyes. `heart` morphs the outline from the superellipse to a heart,
+# vertex by vertex - both are closed polygons of SHAPE_STEPS points in the same
+# winding order, which is what lets them interpolate without popping.
+EMOTION_HEART = {
+    "neutral": 0.0, "happy": 0.0, "sad": 0.0, "curious": 0.0,
+    "surprised": 0.0, "annoyed": 0.0, "sleepy": 0.0,
+    "pleading": 0.85, "scared": 0.0,
+}
+HEART_LERP = 0.09
+
+# The "^^" crescent. Closed, curving upward, thick in the middle and meeting at
+# the corners. Used wherever delight should read as eyes crinkling shut rather
+# than opening wide.
+EMOTION_ARC = {
+    "neutral": 0.0, "happy": 0.55, "sad": 0.0, "curious": 0.0,
+    "surprised": 0.0, "annoyed": 0.0, "sleepy": 0.25,
+    "pleading": 0.0, "scared": 0.0,
+}
+ARC_LERP = 0.09
+ARC_RISE = 0.42          # how far the crescent curves up, of eye half-height
+ARC_THICK = 0.30         # its thickness in the middle, of eye half-height
+
+# Excitement lines, the short strokes radiating off the eyes when something is
+# genuinely delightful. Manga uses them for emphasis; without them a heart-eyed
+# face reads as merely surprised.
+SPARK_LINES = 5
+SPARK_LEN = 0.30         # of eye width
+SPARK_GAP = 0.14
 SHAPE_STEPS = 64         # points around the outline
 SUPERSAMPLE = 2          # render each eye at this scale, then shrink: cheap
                          # antialiasing, and it softens the lid cuts too
@@ -497,6 +575,42 @@ HOTSPOT_BUILD = 288      # a smooth radial gradient carries no fine detail, so
                          # the pupil started changing size.
 
 
+def _heart(cx, cy, a, b, steps=SHAPE_STEPS):
+    """A heart as a closed polygon with the SAME point count and winding as
+    _superellipse, so the two can be blended vertex by vertex."""
+    pts = []
+    for i in range(steps):
+        t = 2.0 * math.pi * i / steps
+        # the classic heart curve, rotated to start where the superellipse does
+        # shifted a quarter turn so t=0 is the RIGHTMOST point, matching where
+        # _superellipse starts - otherwise the morph twists on its way there
+        c = t + math.pi / 2
+        x = 16.0 * math.sin(c) ** 3
+        y = (13.0 * math.cos(c) - 5.0 * math.cos(2 * c)
+             - 2.0 * math.cos(3 * c) - math.cos(4 * c))
+        pts.append((cx + a * (x / 17.0), cy - b * (y / 17.0)))
+    return pts
+
+
+def _arc_eye(cx, cy, a, b, steps=SHAPE_STEPS):
+    """A closed upward crescent - the "^^" of eyes crinkled shut.
+
+    Traced over the SAME angle sweep as _superellipse (t=0 at the right, going
+    the same way round), because these two shapes get blended vertex by vertex.
+    Tracing it as "top edge then bottom edge" instead produced a bowtie: vertex
+    i of one shape landed on the opposite side of the other.
+    """
+    pts = []
+    for i in range(steps):
+        t = 2.0 * math.pi * i / steps
+        u = math.cos(t)
+        bow = 1.0 - u * u                     # 0 at the tips, 1 in the middle
+        side = 1.0 if math.sin(t) >= 0 else -1.0
+        pts.append((cx + a * u,
+                    cy - b * ARC_RISE * bow + side * b * ARC_THICK * bow))
+    return pts
+
+
 def _build_hotspot(size, edge=None):
     """Radial gradient, white at the centre falling to grey at the rim. Blitted
     over an eye with BLEND_RGBA_MULT it becomes soft spherical shading. Built
@@ -558,6 +672,8 @@ class Eye:
     def __init__(self, side):
         self.side = side
         base = EMOTIONS[DEFAULT_EMOTION]
+        self.heart = 0.0
+        self.arc = 0.0
         self.cur = {k: base[k] for k in SHAPE_KEYS}
         self.vel = {k: 0.0 for k in SHAPE_KEYS}
         self.tgt = dict(self.cur)
@@ -598,14 +714,35 @@ class Eye:
 
         # One shape for every preset. Eyelids are carves layered on top, never
         # a different draw path - switching draw paths mid-morph is what pops.
-        pygame.draw.polygon(surf, tint, _superellipse(
-            left + w / 2, top + h / 2, w / 2, h / 2, EYE_SUPER))
+        # One polygon, always. When `heart` is between 0 and 1 the outline is
+        # a blend of the two shapes rather than a switch between them.
+        ecx, ecy = left + w / 2, top + h / 2
+        base = _superellipse(ecx, ecy, w / 2, h / 2, EYE_SUPER)
+        hv = self.heart
+        if hv > 0.002:
+            hp = _heart(ecx, ecy, w / 2, h / 2)
+            base = [(bx + (hx - bx) * hv, by + (hy - by) * hv)
+                    for (bx, by), (hx, hy) in zip(base, hp)]
+        av = self.arc
+        if av > 0.002:
+            ap = _arc_eye(ecx, ecy, w / 2, h / 2)
+            base = [(bx + (ax - bx) * av, by + (ay - by) * av)
+                    for (bx, by), (ax, ay) in zip(base, ap)]
+        pygame.draw.polygon(surf, tint, base)
 
         if self.side < 0:      # left eye: inner edge is on the right
             t_l, t_r = c["top_out"], c["top_in"]
         else:                  # right eye: inner edge is on the left
             t_l, t_r = c["top_in"], c["top_out"]
         b_l = b_r = c["bottom"]
+
+        # The arc IS a closed eye. Carving lids into it as well leaves almost
+        # nothing - happy collapsed into two slivers - so the lids fade out as
+        # the arc comes in.
+        keep = 1.0 - clamp(self.arc)
+        t_l, t_r, b_l, b_r = t_l * keep, t_r * keep, b_l * keep, b_r * keep
+        bend_v = c["bend"] * keep
+        tbend_v = c["tbend"] * keep
 
         # Carve with a fully transparent colour: pygame.draw writes raw RGBA on
         # an SRCALPHA surface, so this erases rather than paints.
@@ -614,11 +751,11 @@ class Eye:
         # leave a dark fringe around every curve.
         clear = (tint[0], tint[1], tint[2], 0)
         over = pad * ss
-        if t_l > 0.001 or t_r > 0.001 or c["tbend"] > 0.001:
-            curve = _lid_curve(left, right, top, h, t_l, t_r, from_top=True, bend=c["tbend"])
+        if t_l > 0.001 or t_r > 0.001 or tbend_v > 0.001:
+            curve = _lid_curve(left, right, top, h, t_l, t_r, from_top=True, bend=tbend_v)
             pygame.draw.polygon(surf, clear, [(left, top - over)] + curve + [(right, top - over)])
-        if b_l > 0.001 or b_r > 0.001 or c["bend"] > 0.001:
-            curve = _lid_curve(left, right, bottom, h, b_l, b_r, from_top=False, bend=c["bend"])
+        if b_l > 0.001 or b_r > 0.001 or bend_v > 0.001:
+            curve = _lid_curve(left, right, bottom, h, b_l, b_r, from_top=False, bend=bend_v)
             pygame.draw.polygon(surf, clear, [(left, bottom + over)] + curve + [(right, bottom + over)])
 
         # Vertical gradient, fixed to the eye (bright top -> deeper bottom).
@@ -703,6 +840,8 @@ class Face:
         self._pupil = 1.0
         self._tint = list(EMOTION_TINT["neutral"])
         self._wink = None            # (side, elapsed)
+        self._mouth = dict(EMOTION_MOUTH["neutral"])
+        self._brow = dict(EMOTION_BROW["neutral"])
 
     # ------------------------------------------------------------- controls
     def set_mode(self, mode):
@@ -866,6 +1005,32 @@ class Face:
             want_p = EMOTION_PUPIL["neutral"]
             want_c = EMOTION_TINT["neutral"]
         self._pupil = smooth(self._pupil, want_p, 0.10, dt)
+
+        want_h = EMOTION_HEART.get(self.emotion, 0.0)
+        if self._emotion_age > EMOTION_HOLD:
+            want_h = 0.0
+        h = smooth(self.left.heart, want_h, HEART_LERP, dt)
+        self.left.heart = self.right.heart = h
+
+        # Genuine delight crinkles the eyes shut, so a high happy dimension
+        # deepens the arc beyond whatever the emotion asks for.
+        want_a = EMOTION_ARC.get(self.emotion, 0.0)
+        if self._emotion_age > EMOTION_HOLD:
+            want_a = 0.0
+        want_a = min(1.0, want_a + clamp((self.dims["happy"] - 0.8) / 0.2) * 0.35)
+        if self.mode == "sleeping":
+            want_a = 0.0                     # asleep is flat, not smiling
+        a = smooth(self.left.arc, want_a, ARC_LERP, dt)
+        self.left.arc = self.right.arc = a
+
+        mt = EMOTION_MOUTH.get(self.emotion, EMOTION_MOUTH["neutral"])
+        bt = EMOTION_BROW.get(self.emotion, EMOTION_BROW["neutral"])
+        if self._emotion_age > EMOTION_HOLD:
+            mt, bt = EMOTION_MOUTH["neutral"], EMOTION_BROW["neutral"]
+        for k in MOUTH_KEYS:
+            self._mouth[k] = smooth(self._mouth[k], mt[k], FACE_PART_LERP, dt)
+        for k in BROW_KEYS:
+            self._brow[k] = smooth(self._brow[k], bt[k], FACE_PART_LERP, dt)
         for i in range(3):
             self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP, dt)
         if self._wink is not None:
@@ -1246,11 +1411,112 @@ class Face:
                         base_w * rm, base_h * rm, bf_r, hotspot, hx, hy, tint,
                         self._vgrad)
 
-        self._draw_blush(surf, W, H, gap, cy + look_y + breathe)
+        eye_cy = cy + look_y + breathe
+        if SHOW_BROWS:
+            self._draw_brows(surf, W, H, gap, base_w, base_h, eye_cy,
+                             look_x, tint)
+        if SHOW_MOUTH:
+            self._draw_mouth(surf, W, H, gap, base_h, eye_cy, look_x, tint)
+        self._draw_sparks(surf, W, H, gap, base_w, base_h, eye_cy, look_x, tint)
+        self._draw_blush(surf, W, H, gap, eye_cy)
         self._draw_symbols(surf, W, H, gap)
 
         if SCANLINE_ALPHA > 0:
             surf.blit(self._scanlines, (0, 0))
+
+    def _draw_mouth(self, surf, W, H, gap, base_h, eye_cy, look_x, tint):
+        """A curved stroke below the eyes. While speaking it opens on the live
+        audio level, which is what the amplitude was always for - riding eye
+        height was the compromise available to a face with no mouth."""
+        m = self._mouth
+        open_amt = m["open"]
+        if self.mode == "speaking":
+            open_amt = max(open_amt, self._amp * 0.9)
+        elif self.mode == "sleeping":
+            open_amt *= 0.3
+
+        half = gap * MOUTH_W * max(0.2, m["w"])
+        cx = W * 0.5 + look_x * 0.35
+        cy = eye_cy + base_h * MOUTH_Y
+        rise = m["curve"] * half * 0.42            # how far the ends lift
+        gape = open_amt * H * MOUTH_OPEN_MAX
+        t = max(2, int(H * MOUTH_T * 0.5))
+
+        def arc(offset):
+            pts = []
+            cat = m["cat"]
+            for i in range(MOUTH_STEPS + 1):
+                f = i / MOUTH_STEPS
+                x = cx - half + 2 * half * f
+                bow = (1.0 - (2 * f - 1) ** 2)     # 0 at the ends, 1 in the middle
+                y = cy - rise * bow + offset * bow
+                if cat > 0.002:
+                    # The "w": two humps instead of one. Blended in, so the
+                    # mouth travels smoothly between a curve and a cat mouth.
+                    w_shape = -math.sin(f * 2 * math.pi) * 0.0 - \
+                        abs(math.sin(f * 2 * math.pi)) * half * 0.30
+                    y += cat * (w_shape + half * 0.15 * bow)
+                pts.append((x, y))
+            return pts
+
+        if gape > t:
+            # An open mouth is the gap between two arcs, filled.
+            top = arc(-gape * 0.35)
+            bottom = arc(gape * 0.65)
+            pygame.draw.polygon(surf, tint, top + list(reversed(bottom)))
+            for p in (top, bottom):
+                pygame.draw.lines(surf, tint, False, p, t)
+        else:
+            pygame.draw.lines(surf, tint, False, arc(0.0), t)
+
+    def _draw_brows(self, surf, W, H, gap, base_w, base_h, eye_cy, look_x, tint):
+        """One stroke over each eye. Mirrored, and tilting the INNER end down
+        is the angry direction - the same rule the eyelids follow, so the brow
+        can never disagree with the eye underneath it."""
+        b = self._brow
+        if b["show"] < 0.04:
+            return
+        half = base_w * BROW_W * 0.5
+        t = max(2, int(H * BROW_T * 0.5 * clamp(b["show"], 0.3, 1.0)))
+        drop = base_h * BROW_Y
+        for side in (-1, 1):
+            cx = W * 0.5 + side * gap + look_x
+            cy = eye_cy - drop - base_h * b["lift"] * 0.5
+            inner = cy + b["tilt"] * base_h * 0.16       # inner end
+            outer = cy - b["tilt"] * base_h * 0.16       # outer end
+            x_in = cx - side * half
+            x_out = cx + side * half
+            pts = []
+            for i in range(9):
+                f = i / 8.0
+                x = x_in + (x_out - x_in) * f
+                y = inner + (outer - inner) * f
+                y -= (1.0 - (2 * f - 1) ** 2) * base_h * 0.05   # slight arch
+                pts.append((x, y))
+            pygame.draw.lines(surf, tint, False, pts, t)
+
+    def _draw_sparks(self, surf, W, H, gap, base_w, base_h, eye_cy, look_x, tint):
+        """Short strokes radiating off the eyes. Manga emphasis lines - without
+        them a heart-eyed face just reads as surprised."""
+        amt = self.left.heart
+        if amt < 0.05:
+            return
+        t = max(2, int(H * 0.006))
+        r0 = base_w * 0.52
+        for side in (-1, 1):
+            cx = W * 0.5 + side * gap + look_x
+            for i in range(SPARK_LINES):
+                # fan across the upper outer quadrant only; lines under the eye
+                # read as whiskers rather than excitement
+                a = math.pi * (1.15 - 0.55 * i / max(1, SPARK_LINES - 1))
+                if side > 0:
+                    a = math.pi - a
+                ca, sa = math.cos(a), math.sin(a)
+                x0 = cx + ca * r0
+                y0 = eye_cy - sa * base_h * 0.42
+                x1 = cx + ca * (r0 + base_w * SPARK_LEN * amt)
+                y1 = eye_cy - sa * base_h * (0.42 + SPARK_GAP * amt)
+                pygame.draw.line(surf, tint, (x0, y0), (x1, y1), t)
 
     def _draw_blush(self, surf, W, H, gap, eye_cy):
         """Two soft ovals under the eyes. Opacity follows how happy it is, so
