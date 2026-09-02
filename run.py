@@ -23,6 +23,7 @@ Keys
   speech     V speak a line   C stop speaking
   mic        M mute/unmute   [ more sensitive   ] less sensitive
   wake       L  turn the wake word off/on (open mic)
+  anims      P  re-read animations/*.json without restarting
 
   other      SPACE blink   TAB demo on/off    I info overlay
              O fullscreen  ESC quit
@@ -88,6 +89,12 @@ try:
 except Exception as _e:                      # keep the face usable without audio
     voice_mod = None
     print("voice disabled (%s)" % _e)
+
+try:
+    import anim as anim_mod
+except Exception as _e:
+    anim_mod = None
+    print("animations disabled (%s)" % _e)
 
 try:
     import memory as memory_mod
@@ -324,6 +331,11 @@ def main():
     font = pygame.font.SysFont("consolas,couriernew,monospace", 13)
 
     face = Face()
+    anims = None
+    if anim_mod is not None:
+        anims = anim_mod.Player()
+        face.anim = anims
+        print("animations: %s" % (", ".join(anims.names()) or "none found"))
     demo = DemoDriver()
     speaker = None
     if voice_mod is not None:
@@ -366,6 +378,8 @@ def main():
                "first meeting" if away is None else "%.1fh" % away))
     exchanges = 0
     prev_mode = face.mode
+    if anims is not None:
+        anims.play("startup")
     convo = None
     if brain_mod is not None and voice_mod is not None:
         try:
@@ -428,6 +442,9 @@ def main():
                 elif k == pygame.K_l:
                     wake_gate = not wake_gate
                     log("wake gate %s" % ("ON" if wake_gate else "OFF - open mic"))
+                elif k == pygame.K_p and anims is not None:
+                    anims.reload()
+                    log("reloaded animations: %s" % ", ".join(anims.names()))
                 elif k == pygame.K_SPACE:
                     face.blink()
                 elif k == pygame.K_TAB:
@@ -523,6 +540,10 @@ def main():
                 if kind == "emotion":
                     last_heard, emotion = payload
                     face.set_emotion(emotion)   # before a word is spoken
+                    if anims is not None and emotion in ("happy", "pleading")                             and face.dims["happy"] > 0.75:
+                        anims.play("delight")
+                    elif anims is not None and emotion == "neutral":
+                        anims.play("nod")
                     face.event("understood")
                     awake_until = time.time() + AWAKE_WINDOW
                 elif kind == "say":

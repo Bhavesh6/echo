@@ -827,6 +827,11 @@ class Face:
         self._gesture = None
         self._gesture_t = 0.0
 
+        # An anim.Player can be attached here. Authored clips keyframe the
+        # SAME parameters the live face uses - Cozmo's ProceduralFaceKeyFrame
+        # approach - so a set-piece still blends with gaze, blinking and mood
+        # instead of replacing them the way a baked frame would.
+        self.anim = None
         self._motion = dict(EMOTION_MOTION[DEFAULT_EMOTION])
         self._antic_until = -1.0
         self._antic_from = None
@@ -942,6 +947,8 @@ class Face:
         self._update_blink(dt)
         self._update_amplitude(dt)
 
+        if self.anim is not None:
+            self.anim.update(dt)
         self._emotion_age += dt
         self._blend_motion(dt)
         self._blend_look(dt)
@@ -1021,7 +1028,10 @@ class Face:
         if self.mode == "sleeping":
             want_a = 0.0                     # asleep is flat, not smiling
         a = smooth(self.left.arc, want_a, ARC_LERP, dt)
+        self.left.heart = self.right.heart = self._anim("heart", self.left.heart)
+        a = self._anim("arc", a)
         self.left.arc = self.right.arc = a
+        self._pupil = self._anim("pupil", self._pupil)
 
         mt = EMOTION_MOUTH.get(self.emotion, EMOTION_MOUTH["neutral"])
         bt = EMOTION_BROW.get(self.emotion, EMOTION_BROW["neutral"])
@@ -1029,8 +1039,10 @@ class Face:
             mt, bt = EMOTION_MOUTH["neutral"], EMOTION_BROW["neutral"]
         for k in MOUTH_KEYS:
             self._mouth[k] = smooth(self._mouth[k], mt[k], FACE_PART_LERP, dt)
+            self._mouth[k] = self._anim("mouth_" + k, self._mouth[k])
         for k in BROW_KEYS:
             self._brow[k] = smooth(self._brow[k], bt[k], FACE_PART_LERP, dt)
+            self._brow[k] = self._anim("brow_" + k, self._brow[k])
         for i in range(3):
             self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP, dt)
         if self._wink is not None:
@@ -1057,6 +1069,17 @@ class Face:
                     size, edge=HOTSPOT_EDGE * (0.45 + 0.35 * st))
             surf = self._hotspots[key]
         return surf
+
+    def _anim(self, target, current):
+        """Blend an authored track over whatever the live face computed. The
+        clip's weight fades in and out, so authored motion never snaps on."""
+        if self.anim is None:
+            return current
+        got = self.anim.sample(target)
+        if got is None:
+            return current
+        value, w = got
+        return current + (value - current) * w
 
     def _blend_motion(self, dt):
         """Ease the motion signature toward the current emotion's. The spring
@@ -1295,6 +1318,10 @@ class Face:
         if self._t < self._antic_until and self._antic_from is not None:
             a = self._antic_from
             shape = {k: a[k] - (shape[k] - a[k]) * self._antic_amt for k in SHAPE_KEYS}
+        if self.anim is not None:
+            for k in SHAPE_KEYS:
+                shape[k] = self._anim(k, shape[k])
+
         if self.mode == "sleeping":
             # Asleep is asleep. Without this the emotion's tilt and asymmetric
             # lids survive into closed eyes, and a shut eye reads as a sad or
