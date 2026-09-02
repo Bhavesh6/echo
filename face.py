@@ -97,8 +97,12 @@ MOUTH_Y = 0.88           # below the eye CENTRES, as a fraction of eye height.
                          # The eye reaches about 0.43 of that below its centre,
                          # so anything under ~0.6 lands in the gap between the
                          # eyes and reads as a nose rather than a mouth.
-MOUTH_W = 0.42           # width, as a fraction of the gap between eye centres
-MOUTH_T = 0.055          # stroke thickness, of window height
+MOUTH_W = 0.52           # width, as a fraction of the gap between eye centres.
+                         # Studies of masked faces find the mouth carries
+                         # POSITIVE emotion and that hiding it costs more
+                         # recognition than hiding any other region - an
+                         # eyes-only face is structurally bad at looking happy.
+MOUTH_T = 0.062          # stroke thickness, of window height
 MOUTH_OPEN_MAX = 0.16    # how far it opens on a loud syllable, of window height
 MOUTH_STEPS = 16         # points along the curve
 
@@ -112,7 +116,7 @@ EMOTION_MOUTH = {
     # cat: 0 a plain curve, 1 the "w" cat mouth - mischief and delight, the
     # shape Tabbie's love animation uses at its peak.
     "neutral":   dict(curve=0.18, w=1.00, open=0.00, cat=0.0),
-    "happy":     dict(curve=0.95, w=1.15, open=0.10, cat=0.35),
+    "happy":     dict(curve=0.95, w=1.35, open=0.10, cat=0.35),
     "sad":       dict(curve=-0.70, w=0.85, open=0.00, cat=0.0),
     "curious":   dict(curve=0.10, w=0.80, open=0.16, cat=0.0),
     "surprised": dict(curve=0.00, w=0.60, open=0.70, cat=0.0),
@@ -130,7 +134,7 @@ EMOTION_BROW = {
     "annoyed":   dict(tilt=-0.75, lift=-0.04, show=1.00),
     "sleepy":    dict(tilt=0.30, lift=-0.10, show=0.55),
     "pleading":  dict(tilt=0.60, lift=0.14, show=1.00),
-    "scared":    dict(tilt=0.45, lift=0.34, show=1.00),
+    "scared":    dict(tilt=0.62, lift=0.34, show=1.00),
 }
 MOUTH_KEYS = ("curve", "w", "open", "cat")
 BROW_KEYS = ("tilt", "lift", "show")
@@ -257,8 +261,8 @@ MOTION_KEYS = ("blink_mul", "blink_dur", "gaze_x", "gaze_y", "tremor", "tremor_h
 EMOTION_MOTION = {
     "neutral":   dict(blink_dur=1.00, antic=0.10, blink_mul=1.00, gaze_x=0.0, gaze_y=0.00, tremor=0.000, tremor_hz=0.0,
                       drift=1.00, breathe=1.00, breathe_hz=1.00, freq=2.20, zeta=1.00),
-    "happy":     dict(blink_dur=0.95, antic=0.18, blink_mul=0.85, gaze_x=0.0, gaze_y=-0.10, tremor=0.000, tremor_hz=0.0,
-                      drift=1.30, breathe=1.45, breathe_hz=1.30, freq=3.10, zeta=0.62),
+    "happy":     dict(blink_dur=0.95, antic=0.07, blink_mul=0.85, gaze_x=0.0, gaze_y=-0.10, tremor=0.000, tremor_hz=0.0,
+                      drift=1.30, breathe=1.45, breathe_hz=1.30, freq=1.95, zeta=0.80),
     "sad":       dict(blink_dur=1.55, antic=0.00, blink_mul=1.90, gaze_x=0.0, gaze_y=0.45, tremor=0.000, tremor_hz=0.0,
                       drift=0.45, breathe=0.55, breathe_hz=0.60, freq=1.05, zeta=1.15),
     "pleading":  dict(blink_dur=1.25, antic=0.05, blink_mul=1.35, gaze_x=0.0, gaze_y=-0.38, tremor=0.010, tremor_hz=7.5,
@@ -1037,11 +1041,16 @@ class Face:
         bt = EMOTION_BROW.get(self.emotion, EMOTION_BROW["neutral"])
         if self._emotion_age > EMOTION_HOLD:
             mt, bt = EMOTION_MOUTH["neutral"], EMOTION_BROW["neutral"]
+        # The mouth and brows move at the emotion's own tempo, not one fixed
+        # rate. A startled mouth has to snap while a genuine smile eases in -
+        # posed expressions are fast and large, spontaneous ones slow and
+        # small, and that difference is most of what separates the two.
+        rate = clamp(FACE_PART_LERP * self._motion["freq"] / 2.2, 0.03, 0.5)
         for k in MOUTH_KEYS:
-            self._mouth[k] = smooth(self._mouth[k], mt[k], FACE_PART_LERP, dt)
+            self._mouth[k] = smooth(self._mouth[k], mt[k], rate, dt)
             self._mouth[k] = self._anim("mouth_" + k, self._mouth[k])
         for k in BROW_KEYS:
-            self._brow[k] = smooth(self._brow[k], bt[k], FACE_PART_LERP, dt)
+            self._brow[k] = smooth(self._brow[k], bt[k], rate, dt)
             self._brow[k] = self._anim("brow_" + k, self._brow[k])
         for i in range(3):
             self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP, dt)
