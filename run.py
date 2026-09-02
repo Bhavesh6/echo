@@ -527,6 +527,8 @@ def main():
                         and len(utt) > 0.4 * voice_mod.SAMPLE_RATE:
                     convo.submit(utt)
                     face.set_mode("thinking")
+                    if anims is not None:
+                        anims.play("focus")
                 else:
                     face.set_mode("idle")
 
@@ -540,10 +542,18 @@ def main():
                 if kind == "emotion":
                     last_heard, emotion = payload
                     face.set_emotion(emotion)   # before a word is spoken
-                    if anims is not None and emotion in ("happy", "pleading")                             and face.dims["happy"] > 0.75:
-                        anims.play("delight")
-                    elif anims is not None and emotion == "neutral":
-                        anims.play("nod")
+                    if anims is not None:
+                        # Authored set-pieces for the moments that deserve
+                        # one; everything else stays fully procedural.
+                        if emotion == "pleading" or (
+                                emotion == "happy" and face.dims["happy"] > 0.92):
+                            anims.play("love")
+                        elif emotion == "happy" and face.dims["happy"] > 0.75:
+                            anims.play("delight")
+                        elif emotion == "sleepy":
+                            anims.play("relax")
+                        elif emotion == "neutral":
+                            anims.play("nod")
                     face.event("understood")
                     awake_until = time.time() + AWAKE_WINDOW
                 elif kind == "say":
