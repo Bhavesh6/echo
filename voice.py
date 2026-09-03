@@ -56,15 +56,63 @@ class Player:
 
     def __init__(self, samplerate=SAMPLE_RATE, device=None, blocksize=BLOCKSIZE):
         self.samplerate = samplerate
+        self.blocksize = blocksize
+        self._want = device            # None means "whatever is default now"
         self._buf = np.zeros(0, dtype=np.float32)
         self._pos = 0
         self._lock = threading.Lock()
         self._level = 0.0
         self._scale = 1.0
+        self._opened_name = None
+        self._last_reopen = 0.0
+        self.reopens = 0
+        self._open()
+
+    @staticmethod
+    def _device_name(idx):
+        try:
+            if idx is None:
+                idx = sd.default.device[1]
+            return sd.query_devices(idx)["name"]
+        except Exception:
+            return None
+
+    def _open(self):
         self.stream = sd.OutputStream(
-            samplerate=samplerate, channels=1, dtype="float32",
-            blocksize=blocksize, device=device, callback=self._callback)
+            samplerate=self.samplerate, channels=1, dtype="float32",
+            blocksize=self.blocksize, device=self._want,
+            callback=self._callback)
         self.stream.start()
+        self._opened_name = self._device_name(self._want)
+
+    def healthy(self):
+        """False when the slot we opened no longer holds the same device.
+
+        A dead OUTPUT cannot be spotted from the signal the way a dead input
+        can: it accepts everything written to it and discards it silently, so
+        the level meter keeps moving while the room stays quiet. The device
+        identity is the only thing that actually changes.
+        """
+        name = self._device_name(self._want)
+        return name is None or self._opened_name is None or \
+            name == self._opened_name
+
+    def reopen(self):
+        now = time.time()
+        if now - self._last_reopen < 5.0:
+            return False
+        self._last_reopen = now
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:
+            pass
+        try:
+            self._open()
+        except Exception:
+            return False
+        self.reopens += 1
+        return True
 
     def _callback(self, outdata, frames, time_info, status):
         with self._lock:

@@ -768,6 +768,12 @@ def main():
             if listener.reopen():
                 log("microphone had gone silent - reopened it on device %s"
                     % listener.device)
+        # And the same for the way out. This one is worse when it happens: a
+        # dead output loses the reply entirely, with every log line saying it
+        # spoke.
+        if speaker is not None and not speaker.player.healthy():
+            if speaker.player.reopen():
+                log("audio output device had changed - reopened it")
 
         talking = speaker is not None and speaker.busy
         if talking:
