@@ -274,18 +274,30 @@ class Speaker:
         """Speak this piece, appending to anything already playing."""
         self._jobs.put(("stream", text))
 
-    def beep(self, name):
+    def beep(self, name, force=False):
         """One non-verbal sound, played immediately - these are punctuation,
         so they are dropped rather than queued if speech is already going.
         Cozmo's audio lead: "if you have voice-over for every single thing he
-        does, it totally gets old"."""
+        does, it totally gets old".
+
+        `force` is for the wake chirp, and only that. Dropping it makes being
+        heard indistinguishable from being ignored, which is the one thing the
+        sound exists to tell you - so instead it interrupts. That is also the
+        correct behaviour on its own terms: someone addressing you by name
+        while you are mid-sentence wants you to stop talking and listen.
+        """
         try:
             import sounds
         except Exception:
             return
         pcm = sounds.get(name)
-        if pcm is not None and not self.player.busy:
-            self.player.play(pcm)
+        if pcm is None:
+            return
+        if self.player.busy:
+            if not force:
+                return
+            self.player.stop()
+        self.player.play(pcm)
 
     def _worker(self):
         while True:

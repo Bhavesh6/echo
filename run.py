@@ -39,6 +39,7 @@ audio envelope.
 """
 import os
 import random
+import re
 import sys
 import time
 
@@ -81,6 +82,7 @@ def log(msg):
 
 import pygame
 
+import agenda as agenda_mod
 import search
 import face as face_mod
 from face import Face, FPS
@@ -117,8 +119,10 @@ class Conversation:
     """Runs transcribe+reply off the render thread. Results come back through
     a queue so the face is only ever touched from the main loop."""
 
-    def __init__(self, brain, location=None):
+    def __init__(self, brain, location=None, agenda=None, timer=None):
         self.brain = brain
+        self.agenda = agenda
+        self.timer = timer
         # Where the person is, for "nearest X" questions. There is no way to
         # infer this and guessing a city would be worse than admitting it, so
         # it comes from LOCATION in .env or stays None.
@@ -177,6 +181,17 @@ class Conversation:
                     extra = search.context_for(heard, self.location)
                 except Exception as e:
                     log("search failed: %s" % e)
+                # The agenda goes in fresh every turn rather than being folded
+                # into brain.context once: it changes as you talk, and a list
+                # that is one exchange out of date is worse than no list.
+                if self.agenda is not None:
+                    try:
+                        extra += self.agenda.context()
+                        if self.timer is not None and self.timer.running:
+                            extra += ("\nA timer is running for %s: %s."
+                                      % (self.timer.label, self.timer.spoken()))
+                    except Exception as e:
+                        log("agenda context failed: %s" % e)
                 if extra:
                     log("looking it up: %s" % extra.strip().splitlines()[0][:70])
                 # Stream it: the emotion tag arrives first so the face can
@@ -196,6 +211,8 @@ class Conversation:
                             log("first words at %.2fs" % (_t.perf_counter() - t0))
                             said_any = True
                         self.results.put(("say", val))
+                    elif kind == "action":
+                        self.results.put(("action", val))
                     elif kind == "done":
                         log("reply: %s" % val)
                         self.results.put(("done", val))
@@ -324,6 +341,63 @@ def _remember(mem, brain):
         log("memory update failed: %s" % e)
 
 
+def apply_action(raw, agenda, timer):
+    """Carry out one <<...>> directive. Returns a line for the log, or None.
+
+    Everything here is best-effort on purpose. A malformed directive is a
+    model mistake, and the right response to one is to drop it quietly - the
+    reply has already been spoken by the time we get here, so raising would
+    only take down the conversation after the user has been answered.
+    """
+    if agenda is None:
+        return None
+    body = (raw or "").strip()
+    low = body.lower()
+
+    if low.startswith("stop timer") or low.startswith("timer stop"):
+        return "timer cancelled" if timer and timer.stop() else None
+
+    if ":" not in body:
+        return None
+    verb, rest = body.split(":", 1)
+    verb, rest = verb.strip().lower(), rest.strip()
+    if not rest:
+        return None
+
+    # "text | extra" - a due time for a task, a label for a timer
+    part, extra = (rest.split("|", 1) + [""])[:2]
+    part, extra = part.strip(), extra.strip()
+
+    if verb == "task":
+        t = agenda.add_task(part, extra or None)
+        return "task added: %s%s" % (
+            part, " (due %s)" % extra if extra and t and t.get("due") else "")
+    if verb == "done":
+        t = agenda.complete_task(part)
+        return "task completed: %s" % t["text"] if t else "no task matching %r" % part
+    if verb == "drop":
+        t = agenda.drop_task(part)
+        return "task dropped: %s" % t["text"] if t else "no task matching %r" % part
+    if verb == "note":
+        agenda.add_note(part)
+        return "note saved: %s" % part
+    if verb == "habit":
+        agenda.add_habit(part)
+        return "habit tracked: %s" % part
+    if verb == "ticked":
+        h = agenda.tick_habit(part)
+        return ("habit ticked: %s (streak %d)" % (h["text"], h.get("streak", 0))
+                if h else "no habit matching %r" % part)
+    if verb == "timer" and timer is not None:
+        try:
+            mins = float(re.findall(r"[\d.]+", part)[0])
+        except (IndexError, ValueError):
+            return None
+        got = timer.start(mins, extra or "focus")
+        return "timer started: %g min (%s)" % (got, timer.label)
+    return None
+
+
 def sd_name(idx):
     try:
         import sounddevice as sd
@@ -403,6 +477,13 @@ def main():
             print("mic unavailable: %s" % e)
     wake = None
     last_talking = 0.0
+    # These need no key and never fail, so they are created unconditionally -
+    # tasks and timers should still work on a machine with no network at all.
+    agenda = agenda_mod.Agenda()
+    timer = agenda_mod.Timer()
+    if agenda.open_tasks() or agenda.data.get("habits"):
+        print("agenda: %d open task(s), %d habit(s)"
+              % (len(agenda.open_tasks()), len(agenda.data.get("habits", []))))
     awake_until = 0.0
     wake_gate = True
     if listener is not None and voice_mod is not None:
@@ -433,7 +514,8 @@ def main():
     if brain_mod is not None and voice_mod is not None:
         try:
             b = brain_mod.best_brain()
-            convo = Conversation(b, location=brain_mod.find_key("LOCATION"))
+            convo = Conversation(b, location=brain_mod.find_key("LOCATION"),
+                                 agenda=agenda, timer=timer)
             if mem is not None:
                 b.context = mem.context()
                 b.known_names = [mem.data["name"]] if mem.data.get("name") else []
@@ -543,7 +625,7 @@ def main():
         if wake is not None and wake.take():
             log("wake word heard")
             if speaker is not None:
-                speaker.beep("wake")         # answer instantly, before thinking
+                speaker.beep("wake", force=True)   # never silently dropped
             face.event("wake_word")          # perk + surprise, as Vector did
             face.set_mode("listening")
             if listener is not None:
@@ -611,6 +693,26 @@ def main():
                     face.set_mode("idle")
 
         # Drain the worker. Face changes happen here, on the main thread.
+        # Checked every frame, not once per exchange: a reminder that only
+        # arrives when you happen to speak first is not a reminder. Held back
+        # while it is already talking so it never speaks over itself.
+        if speaker is not None and not speaker.busy:
+            fired = []
+            try:
+                for t in agenda.due_now():
+                    fired.append("A reminder: %s." % t["text"])
+                if timer.finished():
+                    fired.append("Your %s timer is done." % timer.label)
+            except Exception as e:
+                log("reminder check failed: %s" % e)
+            if fired:
+                line = " ".join(fired)
+                log("reminder fired: %s" % line)
+                face.set_emotion("surprised")
+                face.event("wake_word")
+                speaker.say(line)
+                awake_until = time.time() + AWAKE_WINDOW
+
         if convo is not None:
             for _ in range(8):          # several may land in one frame
                 try:
@@ -634,6 +736,16 @@ def main():
                             anims.play("nod")
                     face.event("understood")
                     awake_until = time.time() + AWAKE_WINDOW
+                elif kind == "action":
+                    # NB: this needs its own branch. Falling through to the
+                    # else below would chirp "did not understand" at the user
+                    # every time the model successfully did what they asked.
+                    try:
+                        msg = apply_action(payload, agenda, timer)
+                        if msg:
+                            log("action: %s" % msg)
+                    except Exception as e:
+                        log("action failed (%r): %s" % (payload, e))
                 elif kind == "say":
                     if speaker is not None:
                         speaker.stream(payload)
