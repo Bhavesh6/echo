@@ -66,10 +66,16 @@ that way.
 really needs it, and even then stay under about eighty words.
 - You CAN: answer general knowledge, explain things, do maths, help think \
 through problems, and chat.
-- You CANNOT: browse the internet, check the weather, read the news, set \
-alarms or reminders, control anything in the house, or remember anything after \
-this conversation ends. You DO know the current date and time; it is given to \
-you below. Say so plainly ONLY if asked \
+- Sometimes a block headed WEB SEARCH RESULTS appears below. When it does, it \
+was looked up on the web moments ago for this exact question and it is \
+current. Answer FROM it. Never say you cannot look things up or have no \
+internet while that block is present - claiming ignorance while holding the \
+answer is the worst thing you can do. Speak it conversationally: do not read \
+the results out, list them, or mention searching.
+- You CANNOT: set alarms or reminders, control anything in the house, or \
+remember anything after this conversation ends. With no search results you \
+also cannot check the weather or the news. You DO know the current date and \
+time; it is given to you below. Say so plainly ONLY if asked \
 for one of exactly those things, and offer what you can do instead.
 - Be helpful by default. Do NOT refuse other requests. If what you heard is \
 garbled, incomplete or makes no sense, do not say you cannot help - say you \
@@ -131,12 +137,15 @@ def speakable(text):
 TAG_RE = re.compile(r"^\s*\[([a-z]+)\]\s*", re.I)
 
 
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
 def find_key(name="GROQ_API_KEY"):
     """Environment first, then a .env beside this file."""
     v = os.environ.get(name)
     if v:
         return v.strip()
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    path = ENV_PATH
     if os.path.exists(path):
         for line in open(path, encoding="utf-8"):
             line = line.strip()
@@ -191,7 +200,7 @@ class Brain:
         self.api_key = api_key or find_key()
         if not self.api_key:
             raise RuntimeError(
-                "No Groq API key. Put GROQ_API_KEY=... in D:\\companion\\.env "
+                "No Groq API key. Put GROQ_API_KEY=... in %s " % ENV_PATH +
                 "or set it in the environment.")
         self.client = Groq(api_key=self.api_key)
         self.chat_model = chat_model or self.pick_model()
@@ -326,12 +335,25 @@ class Brain:
         except Exception:
             stream = self.client.chat.completions.create(**kw)
 
+        def pieces():
+            for chunk in stream:
+                try:
+                    yield chunk.choices[0].delta.content or ""
+                except (AttributeError, IndexError):
+                    yield ""
+
+        for ev in self._stream_events(pieces(), text):
+            yield ev
+
+    def _stream_events(self, pieces, text):
+        """Turn a stream of text fragments into the (emotion, say, done)
+        events run.py consumes.
+
+        Shared by both backends deliberately: the timing here - releasing the
+        first sentence early and short - was tuned against the pause a person
+        actually feels, and a second copy would quietly drift out of step."""
         buf, full, emotion, sent_tag, first = "", "", "neutral", False, True
-        for chunk in stream:
-            try:
-                piece = chunk.choices[0].delta.content or ""
-            except (AttributeError, IndexError):
-                piece = ""
+        for piece in pieces:
             if not piece:
                 continue
             buf += piece
@@ -385,12 +407,17 @@ class Brain:
 # Brain, so run.py does not care which is in use. Speech-to-text stays on Groq
 # Whisper either way - it is fast and free.
 GEMINI_MODELS = [
-    "gemini-2.5-flash",        # 10 req/min, 250/day free - the sensible default
-    "gemini-2.5-pro",          # stronger, but only 5/min and 100/day
-    "gemini-2.5-flash-lite",   # 15/min, 1000/day, weakest
+    # Ordered by MEASURED time to first spoken word, which for a voice
+    # companion matters more than cleverness. Anything on 2.5 is dead:
+    # gemini-2.5-flash now answers "no longer available to new users".
+    "gemini-flash-lite-latest",  # 0.97s - the only one fast enough by default
+    "gemini-3.5-flash",          # verified working
+    "gemini-3.6-flash",          # smartest, but ~21s unless thinking is capped
 ]
 GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/"
               "models/%s:generateContent")
+GEMINI_STREAM_URL = ("https://generativelanguage.googleapis.com/v1beta/"
+                     "models/%s:streamGenerateContent")
 
 
 class GeminiBrain(Brain):
@@ -402,7 +429,7 @@ class GeminiBrain(Brain):
         self.gemini_key = api_key or find_key("GEMINI_API_KEY")
         if not self.gemini_key:
             raise RuntimeError(
-                "No Gemini API key. Put GEMINI_API_KEY=... in D:\\companion\\.env")
+                "No Gemini API key. Put GEMINI_API_KEY=... in %s" % ENV_PATH)
         self.chat_model = model or find_key("GEMINI_MODEL") or GEMINI_MODELS[0]
 
     def reply(self, text):
@@ -451,14 +478,114 @@ class GeminiBrain(Brain):
         self.turns.append({"role": "assistant", "content": raw})
         return raw, emotion
 
+    def _contents(self, text):
+        """The conversation in Gemini's shape: "model" where OpenAI says
+        "assistant", and every turn wrapped in parts."""
+        contents = []
+        for t in self.turns[-self.history * 2:]:
+            contents.append({
+                "role": "model" if t["role"] == "assistant" else "user",
+                "parts": [{"text": t["content"]}]})
+        contents.append({"role": "user", "parts": [{"text": text}]})
+        return contents
+
+    def _pieces(self, text):
+        """Gemini's server-sent-event stream as plain text fragments, so it
+        can feed the same sentence splitter the Groq path uses."""
+        import json
+        import time
+        import urllib.error
+        import urllib.request
+
+        body = json.dumps({
+            "contents": self._contents(text),
+            "systemInstruction": {"parts": [{
+                "text": SYSTEM + "\n" + self.now_line() + self.context}]},
+            "generationConfig": {
+                "temperature": 0.7, "maxOutputTokens": 400,
+                # Uncapped, gemini-3.6-flash spent 21s thinking before saying
+                # a word. A desk companion has to answer like a person, not
+                # like a research assistant.
+                "thinkingConfig": {"thinkingLevel": "LOW"}},
+        }).encode()
+        req = urllib.request.Request(
+            GEMINI_STREAM_URL % self.chat_model
+            + "?alt=sse&key=" + self.gemini_key,
+            data=body, headers={"Content-Type": "application/json"})
+
+        # The free tier returns 503 often enough to matter, and an unretried
+        # one would kill the conversation worker mid-turn. Retrying is only
+        # safe BEFORE anything has been spoken - restarting after partial
+        # output would repeat half a sentence out loud.
+        started = False
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    for line in r:
+                        line = line.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        chunk = line[5:].strip()
+                        if not chunk or chunk == "[DONE]":
+                            continue
+                        try:
+                            d = json.loads(chunk)
+                        except ValueError:
+                            continue
+                        for cand in d.get("candidates", []):
+                            for part in cand.get("content", {}).get("parts", []):
+                                if part.get("text"):
+                                    started = True
+                                    yield part["text"]
+                return
+            except urllib.error.HTTPError as e:
+                if e.code in (429, 500, 502, 503) and not started                         and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+
+    def reply_stream(self, text):
+        """Must be overridden. The inherited one drives the Groq client, so
+        with a Gemini model selected it 404s on the first utterance."""
+        for ev in self._stream_events(self._pieces(text), text):
+            yield ev
+
+    def raw(self, prompt, max_tokens=600):
+        """Overridden for the same reason. memory.py calls this every time a
+        conversation is folded into long-term memory, so inherited it would
+        break remembering rather than talking - a much quieter failure."""
+        import json
+        import urllib.request
+
+        body = json.dumps({
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2,
+                                 "maxOutputTokens": max_tokens},
+        }).encode()
+        req = urllib.request.Request(
+            GEMINI_URL % self.chat_model + "?key=" + self.gemini_key,
+            data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=45) as r:
+            data = json.loads(r.read())
+        out = ""
+        for cand in data.get("candidates", []):
+            for part in cand.get("content", {}).get("parts", []):
+                out += part.get("text", "")
+        return out.strip()
+
 
 def best_brain():
-    """Gemini when a key is present (and not overridden), else Groq. Falls back
-    rather than refusing to start."""
+    """Groq by default; Gemini only when explicitly asked for.
+
+    Measured first-speech latency decided this: Groq 0.57s, Gemini flash-lite
+    0.97s, Gemini 3.6-flash 21.2s. Selecting Gemini the moment a key appeared
+    made Echo answer far slower for no gain - and the key is wanted for other
+    things, so merely having one must not change how fast it talks.
+    Set LLM_BACKEND=gemini in .env to switch."""
     choice = (find_key("LLM_BACKEND") or "").strip().lower()
     if choice == "groq":
         return Brain()
-    if choice == "gemini" or (not choice and find_key("GEMINI_API_KEY")):
+    if choice == "gemini":
         try:
             return GeminiBrain()
         except Exception as e:
