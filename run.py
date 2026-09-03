@@ -341,6 +341,86 @@ def _remember(mem, brain):
         log("memory update failed: %s" % e)
 
 
+# Phrases that only make sense if something was actually recorded. Kept
+# narrow on purpose: a false positive here costs a wasted API call and a
+# possible duplicate task, so "remember" alone is not enough - "I remember
+# you like tea" claims nothing.
+CLAIMED = re.compile(
+    r"\b(i(?:'ve| have)? (?:noted|saved|added|recorded|written (?:it )?down"
+    r"|set|started|marked|logged)"
+    r"|(?:noted|saved|added|recorded) (?:it|that|this)"
+    r"|i(?:'ll| will) remind you"
+    r"|(?:timer|reminder) (?:is )?(?:set|started|running)"
+    r"|added (?:it |that )?to your (?:list|tasks)"
+    r"|(?:marked|ticked) (?:it|that) (?:off|done|complete))\b", re.I)
+
+EXTRACT = """The assistant told the user it had done something, but it forgot \
+the directive that actually does it. Read what was said and reply with ONLY \
+the single directive it should have emitted, and nothing else.
+
+Valid forms:
+<<task: TEXT>>            <<task: TEXT | 2026-01-31T18:00>>
+<<done: TEXT>>            <<drop: TEXT>>
+<<note: TEXT>>            <<habit: TEXT>>
+<<ticked: TEXT>>          <<timer: MINUTES | LABEL>>
+
+If nothing was actually promised, reply with exactly: NONE
+
+The user said: %s
+The assistant replied: %s"""
+
+
+def verify_action(brain, agenda, timer, heard, reply, log):
+    """Recover a directive the model claimed to emit but did not.
+
+    Runs on a worker thread after speaking, so a wrong turn is repaired
+    quietly instead of being discovered days later as a missing note.
+    """
+    try:
+        out = brain.raw(EXTRACT % (heard, reply), max_tokens=80) or ""
+    except Exception as e:
+        return log("verify failed: %s" % e)
+    found = brain_mod.ACTION_RE.findall(out)
+    if not found:
+        return log("claimed an action but none could be recovered: %r"
+                   % reply[:60])
+    for d in found[:1]:
+        msg = apply_action(d.strip(), agenda, timer)
+        log("recovered a dropped action: %s" % (msg or d.strip()))
+
+
+# The model writes what it would SAY, and people say "twenty five minutes",
+# not "25". Asked for a timer it emitted <<timer: twenty | reading>>, which a
+# digits-only parser reads as no number at all - so the timer never started
+# while Echo cheerfully announced that it had. Worse than an error, because
+# nothing looks wrong until the timer does not go off.
+NUMBER_WORDS = {
+    "half": 0.5, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "ninety": 90, "hundred": 100,
+}
+
+
+def spoken_number(text):
+    """A count from digits or from words. "twenty five" is two words that add,
+    which is the only compounding rule that matters below a hundred."""
+    digits = re.findall(r"[\d.]+", text or "")
+    if digits:
+        try:
+            return float(digits[0])
+        except ValueError:
+            pass
+    total, seen = 0.0, False
+    for w in re.findall(r"[a-z]+", (text or "").lower()):
+        if w in NUMBER_WORDS:
+            total += NUMBER_WORDS[w]
+            seen = True
+    return total if seen else None
+
+
 def apply_action(raw, agenda, timer):
     """Carry out one <<...>> directive. Returns a line for the log, or None.
 
@@ -389,9 +469,8 @@ def apply_action(raw, agenda, timer):
         return ("habit ticked: %s (streak %d)" % (h["text"], h.get("streak", 0))
                 if h else "no habit matching %r" % part)
     if verb == "timer" and timer is not None:
-        try:
-            mins = float(re.findall(r"[\d.]+", part)[0])
-        except (IndexError, ValueError):
+        mins = spoken_number(part)
+        if mins is None:
             return None
         got = timer.start(mins, extra or "focus")
         return "timer started: %g min (%s)" % (got, timer.label)
@@ -477,6 +556,7 @@ def main():
             print("mic unavailable: %s" % e)
     wake = None
     last_talking = 0.0
+    turn_actions = []
     # These need no key and never fail, so they are created unconditionally -
     # tasks and timers should still work on a machine with no network at all.
     agenda = agenda_mod.Agenda()
@@ -721,6 +801,7 @@ def main():
                     break
                 if kind == "emotion":
                     last_heard, emotion = payload
+                    turn_actions = []           # a new turn starts here
                     face.set_emotion(emotion)   # before a word is spoken
                     if anims is not None:
                         # Authored set-pieces for the moments that deserve
@@ -741,6 +822,7 @@ def main():
                     # else below would chirp "did not understand" at the user
                     # every time the model successfully did what they asked.
                     try:
+                        turn_actions.append(payload)
                         msg = apply_action(payload, agenda, timer)
                         if msg:
                             log("action: %s" % msg)
@@ -750,6 +832,15 @@ def main():
                     if speaker is not None:
                         speaker.stream(payload)
                 elif kind == "done":
+                    # It said it did something, and nothing was done. Go and
+                    # find out what it meant, off the conversation's path.
+                    if (not turn_actions and last_heard
+                            and CLAIMED.search(val or "")):
+                        log("claimed an action with no directive - checking")
+                        threading.Thread(
+                            target=verify_action,
+                            args=(b, agenda, timer, last_heard, val, log),
+                            daemon=True).start()
                     awake_until = time.time() + AWAKE_WINDOW
                     exchanges += 1
                     if mem is not None and exchanges % MEMORY_EVERY == 0:
