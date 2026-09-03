@@ -72,11 +72,33 @@ current. Answer FROM it. Never say you cannot look things up or have no \
 internet while that block is present - claiming ignorance while holding the \
 answer is the worst thing you can do. Speak it conversationally: do not read \
 the results out, list them, or mention searching.
-- You CANNOT: set alarms or reminders, control anything in the house, or \
-remember anything after this conversation ends. With no search results you \
+- You CANNOT: control anything in the house, or remember a conversation \
+after it ends beyond the tasks and notes you save. With no search results you \
 also cannot check the weather or the news. You DO know the current date and \
 time; it is given to you below. Say so plainly ONLY if asked \
 for one of exactly those things, and offer what you can do instead.
+
+DOING THINGS. You can remember tasks, notes and timers for them. To do it, \
+put a directive anywhere in your reply. It is removed before you are heard, \
+so never read one aloud or mention its syntax - just say naturally what you \
+did. Use at most one per reply, and only when they actually asked for it.
+- The directive is the ONLY thing that makes it happen. If your words say you \
+have noted, remembered, added, saved, started or finished something, the \
+matching directive MUST be in the same reply. Saying you did it without one \
+is a lie, and they will find out later when it is not there.
+- <<task: buy milk>> add a task. Add a due time as <<task: call mum | \
+2026-09-02T18:00>>, in that exact format, worked out from the current date \
+and time given below.
+- <<done: buy milk>> mark a task finished. A few words of it is enough.
+- <<drop: buy milk>> remove a task they no longer want.
+- <<note: the wifi password is on the router>> remember a loose fact.
+- <<habit: read for twenty minutes>> start tracking something daily.
+- <<ticked: read>> mark today's habit done.
+- <<timer: 25 | writing>> start a timer for that many minutes.
+- <<stop timer>> cancel the running timer.
+Their current tasks and timer are listed below when there are any, so answer \
+questions about them from that rather than guessing.
+
 - Be helpful by default. Do NOT refuse other requests. If what you heard is \
 garbled, incomplete or makes no sense, do not say you cannot help - say you \
 did not catch it and ask them to say it again.
@@ -120,6 +142,7 @@ def speakable(text):
     """Strip markup and normalise punctuation so it reads correctly aloud."""
     for bad, good in UNICODE_FIX.items():
         text = text.replace(bad, good)
+    text = re.sub(r"<<[^<>]*>>", " ", text)                 # action directives
     text = re.sub(r"```.*?```", " ", text, flags=re.S)      # code fences
     text = re.sub(r"`([^`]*)`", r"\1", text)                # inline code
     text = re.sub(r"\*\*([^*]*)\*\*", r"\1", text)         # bold
@@ -135,6 +158,12 @@ def speakable(text):
 
 
 TAG_RE = re.compile(r"^\s*\[([a-z]+)\]\s*", re.I)
+
+# Directives the model can put in a reply to make something happen. Angle
+# brackets rather than square ones so they can never be confused with the
+# emotion tag, and stripped in speakable() so a stray one is silently dropped
+# rather than read out as "less than less than task".
+ACTION_RE = re.compile(r"<<([^<>]{1,240})>>")
 
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -388,6 +417,11 @@ class Brain:
         tail = speakable(re.sub(r"\[[a-z]+\]", "", buf, flags=re.I))
         if tail:
             yield ("say", tail)
+
+        # Read the directives off the RAW text: `clean` has had them removed
+        # already, which is the point of stripping them there.
+        for m in ACTION_RE.finditer(full):
+            yield ("action", m.group(1).strip())
 
         clean = speakable(re.sub(r"\[[a-z]+\]", "",
                                 TAG_RE.sub("", full, count=1), flags=re.I))
