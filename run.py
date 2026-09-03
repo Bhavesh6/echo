@@ -83,6 +83,7 @@ def log(msg):
 import pygame
 
 import agenda as agenda_mod
+import prosody
 import search
 import system as system_mod
 import face as face_mod
@@ -168,6 +169,22 @@ class Conversation:
                     log("too short to be a sentence, ignoring: %r" % heard)
                     self.results.put(("nothing", None))
                     continue
+                # How it was said, not just what. Measured off the audio
+                # already in memory, so it costs nothing and arrives before
+                # the model writes a word - which matters, because the model
+                # picks the expression, so tone reaches the FACE through the
+                # same path the words do.
+                tone = {}
+                try:
+                    tone = prosody.analyse(pcm)
+                    if tone.get("arousal"):
+                        self.results.put(("tone", tone))
+                        log("tone: arousal %.2f  energy %.2f  %.1f syl/s  "
+                            "%.0f Hz" % (tone["arousal"], tone["energy"],
+                                         tone["rate"], tone["f0"]))
+                except Exception as e:
+                    log("prosody failed: %s" % e)
+
                 log("you said: %s" % heard)
 
                 # Some questions cannot be answered from what the model knows -
@@ -179,7 +196,11 @@ class Conversation:
                 # turn or end up folded into long-term memory.
                 extra = ""
                 try:
-                    extra = search.context_for(heard, self.location)
+                    extra += prosody.describe(tone)
+                except Exception as e:
+                    log("tone description failed: %s" % e)
+                try:
+                    extra += search.context_for(heard, self.location)
                 except Exception as e:
                     log("search failed: %s" % e)
                 # The agenda goes in fresh every turn rather than being folded
@@ -842,8 +863,17 @@ def main():
                             anims.play("nod")
                     face.event("understood")
                     awake_until = time.time() + AWAKE_WINDOW
+                elif kind == "tone":
+                    # The face moves on tone BEFORE the reply exists. Waiting
+                    # for the model means a second of blankness after someone
+                    # shouts, which is the moment a person would react in.
+                    ar = payload.get("arousal", 0.0)
+                    if ar > 0.80:
+                        face.event("startled")
+                    elif ar > 0.62:
+                        face.event("speech_start")
+                    face.set_amplitude(min(1.0, ar))
                 elif kind == "action":
-                    # NB: this needs its own branch. Falling through to the
                     # else below would chirp "did not understand" at the user
                     # every time the model successfully did what they asked.
                     try:
