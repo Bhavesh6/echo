@@ -404,6 +404,8 @@ class Listener:
                                     # Adjustable live; the right value depends
                                     # on the room and how far away you sit.
         self.muted = False          # held True while WE are talking
+        self.forced = False         # held True while push-to-talk is pressed
+        self._release = False       # set once, to close a held utterance
         self._above = 0
         self._below = 0
         self._pre = collections.deque(maxlen=PRE_ROLL_BLOCKS)
@@ -453,6 +455,20 @@ class Listener:
         elif self.speaking and self._below >= VAD_RELEASE:
             self.speaking = False
 
+        # Push-to-talk overrides the detector completely. While the key is
+        # held every block is kept whatever its level, so a quiet or hesitant
+        # sentence cannot be cut in half by the VAD - which is the whole point
+        # of holding a button instead of trusting a threshold. Releasing ends
+        # the utterance on the very next block rather than waiting out
+        # VAD_RELEASE, because letting go is a far clearer end-of-speech
+        # signal than a second of silence.
+        if self.forced:
+            self.speaking = True
+            self._above = self._below = 0
+        elif self._release:
+            self._release = False
+            self.speaking = False
+
         # Keep the audio itself, not just its level - this is what gets
         # transcribed.
         if self.speaking:
@@ -467,6 +483,17 @@ class Listener:
                 with self._ulock:
                     self._ready = np.concatenate(self._utt)
                 self._utt = []
+
+    def press(self):
+        """Push-to-talk pressed: discard anything in flight and capture from
+        the pre-roll, so the first syllable is not clipped."""
+        self.restart_utterance()
+        self.forced = True
+
+    def release(self):
+        """Push-to-talk released: close the utterance on the next block."""
+        self.forced = False
+        self._release = True
 
     def restart_utterance(self):
         """Throw away whatever has been captured so far and begin again from

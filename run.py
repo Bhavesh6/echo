@@ -25,7 +25,9 @@ Keys
   wake       L  turn the wake word off/on (open mic)
   anims      P  re-read animations/*.json without restarting
 
-  other      SPACE blink   TAB demo on/off    I info overlay
+  pixels     0  LED / smooth      - and =  coarser / finer
+  talk       SPACE (hold) push-to-talk - no wake phrase needed
+  other      B blink       TAB demo on/off    I info overlay
              O fullscreen  ESC quit
 
 Talk to it and it answers: Groq Whisper transcribes you, an LLM writes a short
@@ -79,6 +81,8 @@ def log(msg):
 
 import pygame
 
+import search
+import face as face_mod
 from face import Face, FPS
 
 import queue
@@ -113,8 +117,12 @@ class Conversation:
     """Runs transcribe+reply off the render thread. Results come back through
     a queue so the face is only ever touched from the main loop."""
 
-    def __init__(self, brain):
+    def __init__(self, brain, location=None):
         self.brain = brain
+        # Where the person is, for "nearest X" questions. There is no way to
+        # infer this and guessing a city would be worse than admitting it, so
+        # it comes from LOCATION in .env or stays None.
+        self.location = location
         self.jobs = queue.Queue()
         self.results = queue.Queue()
         self.working = False
@@ -136,8 +144,14 @@ class Conversation:
                 rms = float(_np.sqrt(_np.mean(pcm * pcm))) if len(pcm) else 0.0
                 log("audio: %.2fs  peak %.3f  rms %.4f  clipped %.2f%%%s"
                     % (len(pcm) / 16000.0, peak, rms, clipped * 100,
-                       "   <-- CLIPPING" if clipped > 0.005 else ""))
+                       "   <-- CLIPPING, transcription will be garbled"
+                       if (clipped > 0.0005 or peak >= 0.99) else ""))
                 save_utterance(pcm)
+                if peak < MIN_UTTERANCE_PEAK or rms < MIN_UTTERANCE_RMS:
+                    log("nothing audible in that (peak %.3f rms %.4f) - not "
+                        "transcribing" % (peak, rms))
+                    self.results.put(("nothing", None))
+                    continue
                 heard = self.brain.transcribe(pcm)
                 if not heard.strip():
                     log("transcription was empty")
@@ -150,12 +164,30 @@ class Conversation:
                     self.results.put(("nothing", None))
                     continue
                 log("you said: %s" % heard)
+
+                # Some questions cannot be answered from what the model knows -
+                # today's date, the weather, where the nearest anything is. Look
+                # those up and put the results in the system prompt for THIS
+                # turn only, then put the prompt back. Injecting into the system
+                # prompt rather than into the user's words keeps the search out
+                # of the conversation history, so it cannot confuse the next
+                # turn or end up folded into long-term memory.
+                extra = ""
+                try:
+                    extra = search.context_for(heard, self.location)
+                except Exception as e:
+                    log("search failed: %s" % e)
+                if extra:
+                    log("looking it up: %s" % extra.strip().splitlines()[0][:70])
                 # Stream it: the emotion tag arrives first so the face can
                 # react immediately, and each finished sentence is spoken
                 # while the rest is still being written.
                 import time as _t
                 t0 = _t.perf_counter()
                 said_any = False
+                saved_ctx = self.brain.context
+                if extra:
+                    self.brain.context = saved_ctx + extra
                 for kind, val in self.brain.reply_stream(heard):
                     if kind == "emotion":
                         self.results.put(("emotion", (heard, val)))
@@ -167,6 +199,7 @@ class Conversation:
                     elif kind == "done":
                         log("reply: %s" % val)
                         self.results.put(("done", val))
+                self.brain.context = saved_ctx
             except Exception as e:
                 log("brain error: %s" % e)
                 self.results.put(("error", str(e)))
@@ -237,6 +270,21 @@ class DemoDriver:
 # every exchange. Long enough for a back-and-forth without repeating yourself,
 # short enough that it stops listening when you walk away.
 AWAKE_WINDOW = 30.0
+# Below this there is nothing to transcribe. Whisper does not return an empty
+# string for silence - it invents. Fed a buffer of zeros it reliably produces
+# "Thank you.", which then gets answered as though it were said. Measured in
+# this room: the noise floor peaks around 0.011, ordinary speech above 0.17,
+# so anything under 0.04 carries no voice at all.
+MIN_UTTERANCE_PEAK = 0.04
+MIN_UTTERANCE_RMS = 0.0015
+# How long to stay deaf AFTER we stop talking. The ReSpeaker cancels echo only
+# for sound played through its own jack; with PC speakers it has no idea what
+# we sounded like, so the only defence is not listening while we talk. Ending
+# that the instant playback stops is too early - the room is still ringing, and
+# the speaker buffer is still draining - and the tail gets captured as a new
+# utterance, transcribed as garbage, and answered. That is the loop where it
+# appears to hear things nobody said.
+MUTE_TAIL = 0.35
 MEMORY_EVERY = 3          # exchanges between memory updates
 
 LINES = [
@@ -354,6 +402,7 @@ def main():
         except Exception as e:
             print("mic unavailable: %s" % e)
     wake = None
+    last_talking = 0.0
     awake_until = 0.0
     wake_gate = True
     if listener is not None and voice_mod is not None:
@@ -384,7 +433,7 @@ def main():
     if brain_mod is not None and voice_mod is not None:
         try:
             b = brain_mod.best_brain()
-            convo = Conversation(b)
+            convo = Conversation(b, location=brain_mod.find_key("LOCATION"))
             if mem is not None:
                 b.context = mem.context()
                 b.known_names = [mem.data["name"]] if mem.data.get("name") else []
@@ -408,6 +457,11 @@ def main():
                 running = False
             elif ev.type == pygame.VIDEORESIZE:
                 screen = pygame.display.set_mode((ev.w, ev.h), pygame.RESIZABLE)
+            elif ev.type == pygame.KEYUP:
+                if ev.key == pygame.K_SPACE and listener is not None                         and listener.forced:
+                    listener.release()
+                    awake_until = time.time() + AWAKE_WINDOW
+                    log("push-to-talk released")
             elif ev.type == pygame.KEYDOWN:
                 k = ev.key
                 if k == pygame.K_ESCAPE:
@@ -445,8 +499,30 @@ def main():
                 elif k == pygame.K_p and anims is not None:
                     anims.reload()
                     log("reloaded animations: %s" % ", ".join(anims.names()))
-                elif k == pygame.K_SPACE:
+                elif k == pygame.K_b:
                     face.blink()
+                elif k == pygame.K_0:
+                    face_mod.PIXEL_MODE = not face_mod.PIXEL_MODE
+                    face._px = None
+                    log("pixel mode %s (%d px wide)"
+                        % ("ON" if face_mod.PIXEL_MODE else "OFF",
+                           face_mod.PIXEL_COLS))
+                elif k in (pygame.K_MINUS, pygame.K_EQUALS):
+                    face_mod.PIXEL_COLS = max(48, min(320,
+                        face_mod.PIXEL_COLS + (16 if k == pygame.K_EQUALS
+                                               else -16)))
+                    face._px = None
+                    log("pixel resolution %d px wide" % face_mod.PIXEL_COLS)
+                elif k == pygame.K_SPACE and listener is not None:
+                    # Hold to talk. Interrupts speech, because wanting to cut
+                    # in is exactly why you would grab the key mid-sentence.
+                    if speaker is not None and speaker.busy:
+                        speaker.player.stop()
+                    listener.press()
+                    face.set_mode("listening")
+                    awake_until = time.time() + AWAKE_WINDOW
+                    demo_on = False
+                    log("push-to-talk held")
                 elif k == pygame.K_TAB:
                     demo_on = not demo_on
                 elif k == pygame.K_i:
@@ -478,11 +554,13 @@ def main():
         awake = (wake is None) or (not wake_gate) or (now < awake_until)
 
         talking = speaker is not None and speaker.busy
+        if talking:
+            last_talking = now
         if listener is not None:
             # No echo cancellation without a speaker in the ReSpeaker's own
             # jack, so the mic would otherwise hear us and we would react to
             # ourselves forever. Deafen it while we talk.
-            listener.muted = talking
+            listener.muted = talking or (now - last_talking) < MUTE_TAIL
 
         if talking:
             face.set_mode("speaking")
