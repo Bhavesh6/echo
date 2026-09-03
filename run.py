@@ -768,12 +768,8 @@ def main():
             if listener.reopen():
                 log("microphone had gone silent - reopened it on device %s"
                     % listener.device)
-        # And the same for the way out. This one is worse when it happens: a
-        # dead output loses the reply entirely, with every log line saying it
-        # spoke.
-        if speaker is not None and not speaker.player.healthy():
-            if speaker.player.reopen():
-                log("audio output device had changed - reopened it")
+        # Nothing to check on the way out any more: the player takes a new
+        # stream for every utterance, so it cannot be holding a stale one.
 
         talking = speaker is not None and speaker.busy
         if talking:
@@ -897,10 +893,14 @@ def main():
                             log("action: %s" % msg)
                         # Most actions match what was already said out loud -
                         # "Opening Chrome" needs no echo. A lookup is
-                        # different: its result IS the answer, and nobody
-                        # reads the log.
-                        if msg and payload.strip().lower().startswith("find") \
-                                and speaker is not None:
+                        # different: its result IS the answer, and a failure is
+                        # news the user has to hear: "Done." in a log helps
+                        # nobody when no music started. Everything else
+                        # already matches what was said out loud.
+                        if msg and speaker is not None and (
+                                payload.strip().lower().startswith("find")
+                                or msg.startswith("I could not")
+                                or msg.startswith("That does not look")):
                             speaker.say(msg)
                     except Exception as e:
                         log("action failed (%r): %s" % (payload, e))

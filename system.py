@@ -235,6 +235,9 @@ def media(arg):
     key = VK.get(_norm(arg).split(" ")[0])
     if key is None:
         return None
+    if not media_app_running():
+        return ("I could not start any music - there is no music app or "
+                "browser open for the media keys to reach.")
     ctypes.windll.user32.keybd_event(key, 0, 0, 0)
     ctypes.windll.user32.keybd_event(key, 0, 2, 0)      # 2 = KEYEVENTF_KEYUP
     return "Done."
@@ -426,3 +429,27 @@ def context_for(text):
         return ""
     return ("\nTHIS MACHINE, read just now - answer from it, conversationally:\n"
             + "\n".join(bits))
+
+
+# Applications that respond to the media keys. Sending VK_MEDIA_PLAY_PAUSE
+# into a desktop with no player open does nothing at all - the key goes
+# nowhere and the call returns success, so Echo said "Starting the music now"
+# to a silent room. Better to find out first and say so.
+MEDIA_APPS = ("spotify", "vlc", "wmplayer", "musicbee", "foobar2000",
+              "itunes", "aimp", "winamp", "groove", "music.ui", "deezer",
+              "chrome", "msedge", "firefox", "brave", "opera")
+
+
+def media_app_running():
+    try:
+        import psutil
+    except ImportError:
+        return True          # cannot tell; assume yes rather than refuse
+    try:
+        for pr in psutil.process_iter(["name"]):
+            n = (pr.info.get("name") or "").lower()
+            if any(a in n for a in MEDIA_APPS):
+                return True
+    except Exception:
+        return True
+    return False

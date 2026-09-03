@@ -83,19 +83,44 @@ class Player:
             blocksize=self.blocksize, device=self._want,
             callback=self._callback)
         self.stream.start()
-        self._opened_name = self._device_name(self._want)
+        # the index actually bound, not "whatever default means right now"
+        try:
+            self._opened_name = sd.query_devices(self.stream.device)["name"]
+        except Exception:
+            self._opened_name = None
 
     def healthy(self):
-        """False when the slot we opened no longer holds the same device.
+        """Kept so the caller need not care how staleness is handled. It is
+        always True now: a stream is never reused across a silence, so there
+        is no stale state left to report."""
+        return True
 
-        A dead OUTPUT cannot be spotted from the signal the way a dead input
-        can: it accepts everything written to it and discards it silently, so
-        the level meter keeps moving while the room stays quiet. The device
-        identity is the only thing that actually changes.
+    def refresh(self):
+        """Open a fresh stream for a new utterance.
+
+        Called when nothing is playing, so there is no click to worry about,
+        and never more than a few times a second.
         """
-        name = self._device_name(self._want)
-        return name is None or self._opened_name is None or \
-            name == self._opened_name
+        now = time.time()
+        if now - self._last_reopen < 0.30:
+            return False
+        self._last_reopen = now
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:
+            pass
+        try:
+            self._open()
+        except Exception:
+            # Losing the stream entirely is worse than a possibly stale one,
+            # so put the old settings back and carry on.
+            try:
+                self._open()
+            except Exception:
+                return False
+        self.reopens += 1
+        return True
 
     def reopen(self):
         now = time.time()
@@ -136,6 +161,7 @@ class Player:
             return self._pos < len(self._buf)
 
     def play(self, pcm):
+        self.refresh()               # a new utterance gets a new stream
         pcm = np.asarray(pcm, dtype=np.float32)
         peak = float(np.abs(pcm).max()) if len(pcm) else 0.0
         self._scale = (0.90 / peak) if peak > 0 else 1.0
@@ -148,6 +174,10 @@ class Player:
         normalising each sentence on its own peak would make quiet sentences
         suddenly loud."""
         pcm = np.asarray(pcm, dtype=np.float32)
+        with self._lock:
+            playing = self._pos < len(self._buf)
+        if not playing:
+            self.refresh()           # starting fresh, so take a fresh stream
         with self._lock:
             playing = self._pos < len(self._buf)
             if not playing:
