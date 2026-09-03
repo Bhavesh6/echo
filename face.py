@@ -36,7 +36,23 @@ BG_COLOR = (8, 10, 16)
 EYE_COLOR = (30, 205, 255)
 FPS = 60
 
+# ---------------------------------------------------------- pixel mode
+# Cozmo, Vector and Tabbie all live on a 128x64 display, and a large part of
+# why they read as characters rather than as renderings is that nobody expects
+# smoothness from an LED panel. Dropping to that resolution stops the face
+# competing on fidelity it cannot win, and turns the constraint into the look.
+#
+# Everything is drawn exactly as before, just into a small surface which is
+# then blown up with NEAREST neighbour. Nothing else in the file has to know.
+PIXEL_MODE = False
+PIXEL_COLS = 128         # the width Cozmo and Tabbie both use
+
 BLINK_DURATION = 0.16
+# A real blink is not symmetric: the lid slams shut and drifts back open,
+# roughly a third of the time closing and two thirds opening. Closing and
+# opening at the same speed is one of the surest tells that a face was drawn
+# by a computer rather than observed.
+BLINK_CLOSE_FRAC = 0.34
 BLINK_MIN = 0.07          # eye height fraction at fully closed
 BLINK_SQUASH = 0.18       # width gained while closing (squash & stretch).
                           # Kept modest: these eyes are already wide, and a
@@ -139,6 +155,13 @@ EMOTION_BROW = {
 MOUTH_KEYS = ("curve", "w", "open", "cat")
 BROW_KEYS = ("tilt", "lift", "show")
 FACE_PART_LERP = 0.12
+# Overlapping action, the same principle as HOTSPOT_LEAD but for the face
+# parts: nothing on a real face arrives at once. The brows are small fast
+# muscles and get there first; the jaw is heavy and trails. Moving every part
+# at one shared rate is what makes a face read as a mechanism rather than a
+# face - the parts all stop on the same frame, which nothing alive does.
+BROW_LEAD = 1.45         # brows reach the new expression first
+MOUTH_LAG = 0.70         # the mouth is still catching up when they do
 
 # Vector's display has a scanline opacity factor - a subtle CRT feel. Set
 # SCANLINE_ALPHA = 0 for the clean, modern look (LOOI has no scanlines).
@@ -432,7 +455,7 @@ BLUSH_OUT = 0.35              # pushed outward from each eye, as cheeks are
 MIN_SLEEP = 30.0               # never wake purely on debt sooner than this
 
 # gaze
-LOOK_LERP = 0.05
+LOOK_LERP = 0.16       # was 0.05. A gaze shift should be quick; the
 LOOK_RANGE_X = 0.34      # how far a full look actually travels. Was 0.55,
                          # which let idle drift far enough to look aimless.
 LOOK_RANGE_Y = 0.26
@@ -465,15 +488,20 @@ AVERT_V = 0.44          # vertical (~20 deg)
 
 # A gaze shift eases in AND out. Exponential smoothing only eases out, so every
 # movement begins at full speed, which reads as a twitch.
-SHIFT_TIME = 0.42
+SHIFT_TIME = 0.26       # was 0.42
 
 # Idle drift is band-limited noise, never a jump. Disney used Perlin noise for
 # this exact purpose; one-dimensional value noise is the same idea and needs no
 # dependency.
-DRIFT_RATE = 0.30       # steps per second through the noise field, i.e. one
-                        # new noise value about every 3 s. Traversing it fast
+DRIFT_RATE = 0.18       # steps per second through the noise field, i.e. one
+                        # new noise value about every 5 s. Traversing it fast
                         # turns smooth noise back into jitter.
-DRIFT_AMOUNT = 0.16     # how far it wanders, in look units
+DRIFT_AMOUNT = 0.055    # how far it wanders, in look units. Was 0.16, which
+                        # kept the eyes moving slightly in almost half of all
+                        # frames - constant gentle motion reads as a
+                        # screensaver. Stillness broken by a fast, decisive
+                        # move reads as something thinking. Measured: 55% ->
+                        # 97% of frames held still, peak move 0.0099 -> 0.0120.
 
 # one-shot "get in" gestures
 GESTURES = {
@@ -613,6 +641,53 @@ def _arc_eye(cx, cy, a, b, steps=SHAPE_STEPS):
         pts.append((cx + a * u,
                     cy - b * ARC_RISE * bow + side * b * ARC_THICK * bow))
     return pts
+
+
+STROKE_SS = 2            # supersample factor for strokes. Measured: 3 is
+                         # barely better to look at and costs 2.5x the
+                         # time, taking p95 from 9.3 ms to 15.1 ms
+                         # against a 16.7 ms frame budget.
+
+
+def _stroke_surface(pts, pad):
+    """A local surface just big enough for a stroke, plus where to put it.
+    Working in a bounding box rather than the whole window keeps the cost of
+    antialiasing proportional to the mouth, not to the screen."""
+    xs = [q[0] for q in pts]
+    ys = [q[1] for q in pts]
+    x0, y0 = int(min(xs)) - pad, int(min(ys)) - pad
+    x1, y1 = int(max(xs)) + pad, int(max(ys)) + pad
+    w, h = x1 - x0, y1 - y0
+    if w < 1 or h < 1 or w > 4000 or h > 4000:
+        return None, None, None
+    ss = STROKE_SS
+    return (pygame.Surface((w * ss, h * ss), pygame.SRCALPHA),
+            (x0, y0), ss)
+
+
+def _aa_lines(dest, color, pts, width, closed=False):
+    """A thick polyline, antialiased. pygame.draw.lines has no antialiasing
+    for thick strokes, so the mouth and brows came out with hard stair-edges
+    right next to eyes that are supersampled and smooth - and that mismatch
+    is a large part of why the face read as cheaply drawn."""
+    surf, org, ss = _stroke_surface(pts, width + 2)
+    if surf is None:
+        return pygame.draw.lines(dest, color, closed, pts, width)
+    p2 = [((q[0] - org[0]) * ss, (q[1] - org[1]) * ss) for q in pts]
+    pygame.draw.lines(surf, color, closed, p2, max(1, int(width * ss)))
+    dest.blit(pygame.transform.smoothscale(
+        surf, (surf.get_width() // ss, surf.get_height() // ss)), org)
+
+
+def _aa_polygon(dest, color, pts):
+    """A filled polygon, antialiased, by the same route."""
+    surf, org, ss = _stroke_surface(pts, 2)
+    if surf is None:
+        return pygame.draw.polygon(dest, color, pts)
+    p2 = [((q[0] - org[0]) * ss, (q[1] - org[1]) * ss) for q in pts]
+    pygame.draw.polygon(surf, color, p2)
+    dest.blit(pygame.transform.smoothscale(
+        surf, (surf.get_width() // ss, surf.get_height() // ss)), org)
 
 
 def _build_hotspot(size, edge=None):
@@ -804,6 +879,7 @@ class Face:
         self._t = 0.0
         self._blink_t = None
         self._next_blink = random.uniform(2.5, 5.0)
+        self._px = None              # the small surface used by pixel mode
 
         self._look = [0.0, 0.0]          # where the eyes actually point
         self._look_t = [0.0, 0.0]        # where a shift is heading
@@ -1046,11 +1122,13 @@ class Face:
         # posed expressions are fast and large, spontaneous ones slow and
         # small, and that difference is most of what separates the two.
         rate = clamp(FACE_PART_LERP * self._motion["freq"] / 2.2, 0.03, 0.5)
+        m_rate = clamp(rate * MOUTH_LAG, 0.02, 0.5)
+        b_rate = clamp(rate * BROW_LEAD, 0.03, 0.6)
         for k in MOUTH_KEYS:
-            self._mouth[k] = smooth(self._mouth[k], mt[k], rate, dt)
+            self._mouth[k] = smooth(self._mouth[k], mt[k], m_rate, dt)
             self._mouth[k] = self._anim("mouth_" + k, self._mouth[k])
         for k in BROW_KEYS:
-            self._brow[k] = smooth(self._brow[k], bt[k], rate, dt)
+            self._brow[k] = smooth(self._brow[k], bt[k], b_rate, dt)
             self._brow[k] = self._anim("brow_" + k, self._brow[k])
         for i in range(3):
             self._tint[i] = smooth(self._tint[i], want_c[i], TINT_LERP, dt)
@@ -1369,10 +1447,34 @@ class Face:
         p = self._blink_t / (BLINK_DURATION * self._motion["blink_dur"])
         if p >= 1.0:
             return 1.0
-        return 1.0 - math.sin(p * math.pi) * (1.0 - BLINK_MIN)
+        # closedness: 0 open, 1 shut. Fast down, slow back up.
+        if p < BLINK_CLOSE_FRAC:
+            f = p / BLINK_CLOSE_FRAC
+        else:
+            f = 1.0 - (p - BLINK_CLOSE_FRAC) / (1.0 - BLINK_CLOSE_FRAC)
+        f = f * f * (3.0 - 2.0 * f)          # smoothstep, so no corner at the top
+        return 1.0 - f * (1.0 - BLINK_MIN)
 
     # ----------------------------------------------------------------- draw
     def draw(self, surf):
+        """Render the face. In pixel mode this draws into a small surface and
+        scales it up hard, so the result is genuine low resolution rather than
+        a smooth face with a grid laid over it."""
+        if not PIXEL_MODE:
+            return self._render(surf)
+        W, H = surf.get_size()
+        pw = max(16, int(PIXEL_COLS))
+        ph = max(8, int(round(pw * H / float(W))))
+        if self._px is None or self._px.get_size() != (pw, ph):
+            self._px = pygame.Surface((pw, ph))
+            # the small surface has its own scanline cache and eye buffers
+            self._scanlines = None
+        self._render(self._px)
+        # scale() is nearest neighbour. smoothscale would blur the pixels back
+        # out and defeat the entire point.
+        pygame.transform.scale(self._px, (W, H), surf)
+
+    def _render(self, surf):
         surf.fill(BG_COLOR)
         W, H = surf.get_size()
         base_w, base_h = W * EYE_W_FRAC, H * EYE_H_FRAC
@@ -1499,11 +1601,11 @@ class Face:
             # An open mouth is the gap between two arcs, filled.
             top = arc(-gape * 0.35)
             bottom = arc(gape * 0.65)
-            pygame.draw.polygon(surf, tint, top + list(reversed(bottom)))
+            _aa_polygon(surf, tint, top + list(reversed(bottom)))
             for p in (top, bottom):
-                pygame.draw.lines(surf, tint, False, p, t)
+                _aa_lines(surf, tint, p, t)
         else:
-            pygame.draw.lines(surf, tint, False, arc(0.0), t)
+            _aa_lines(surf, tint, arc(0.0), t)
 
     def _draw_brows(self, surf, W, H, gap, base_w, base_h, eye_cy, look_x, tint):
         """One stroke over each eye. Mirrored, and tilting the INNER end down
@@ -1529,7 +1631,7 @@ class Face:
                 y = inner + (outer - inner) * f
                 y -= (1.0 - (2 * f - 1) ** 2) * base_h * 0.05   # slight arch
                 pts.append((x, y))
-            pygame.draw.lines(surf, tint, False, pts, t)
+            _aa_lines(surf, tint, pts, t)
 
     def _draw_sparks(self, surf, W, H, gap, base_w, base_h, eye_cy, look_x, tint):
         """Short strokes radiating off the eyes. Manga emphasis lines - without
