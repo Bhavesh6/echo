@@ -897,11 +897,11 @@ def main():
                     # It said it did something, and nothing was done. Go and
                     # find out what it meant, off the conversation's path.
                     if (not turn_actions and last_heard
-                            and CLAIMED.search(val or "")):
+                            and CLAIMED.search(payload or "")):
                         log("claimed an action with no directive - checking")
                         threading.Thread(
                             target=verify_action,
-                            args=(b, agenda, timer, last_heard, val, log),
+                            args=(b, agenda, timer, last_heard, payload, log),
                             daemon=True).start()
                     awake_until = time.time() + AWAKE_WINDOW
                     exchanges += 1
