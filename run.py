@@ -84,6 +84,7 @@ import pygame
 
 import agenda as agenda_mod
 import search
+import system as system_mod
 import face as face_mod
 from face import Face, FPS
 
@@ -184,6 +185,10 @@ class Conversation:
                 # The agenda goes in fresh every turn rather than being folded
                 # into brain.context once: it changes as you talk, and a list
                 # that is one exchange out of date is worse than no list.
+                try:
+                    extra += system_mod.context_for(heard)
+                except Exception as e:
+                    log("machine state failed: %s" % e)
                 if self.agenda is not None:
                     try:
                         extra += self.agenda.context()
@@ -352,7 +357,19 @@ CLAIMED = re.compile(
     r"|i(?:'ll| will) remind you"
     r"|(?:timer|reminder) (?:is )?(?:set|started|running)"
     r"|added (?:it |that )?to your (?:list|tasks)"
-    r"|(?:marked|ticked) (?:it|that) (?:off|done|complete))\b", re.I)
+    r"|(?:marked|ticked) (?:it|that) (?:off|done|complete)"
+    # Acting on the machine is the same promise in a different tense.
+    # It said "Opening Chrome." and emitted no directive at all, which
+    # is the identical failure to claiming a saved note: silent, and
+    # only discovered when the thing asked for does not happen.
+    # \w+ not a single character: the group is followed by \b, and
+    # "Opening C" ends mid-word in "Chrome", where no boundary exists.
+    r"|(?:opening|launching|starting) [a-z0-9]\w*"
+    r"|(?:locking|pausing|resuming|muting|unmuting|skipping)"
+    r"|(?:lowering|raising) (?:the )?volume"
+    r"|turning (?:the volume|it) (?:up|down)"
+    r"|taking a screenshot|volume (?:down|up|to)"
+    r"|(?:playing|skipping to) the (?:next|previous))\b", re.I)
 
 EXTRACT = """The assistant told the user it had done something, but it forgot \
 the directive that actually does it. Read what was said and reply with ONLY \
@@ -363,6 +380,9 @@ Valid forms:
 <<done: TEXT>>            <<drop: TEXT>>
 <<note: TEXT>>            <<habit: TEXT>>
 <<ticked: TEXT>>          <<timer: MINUTES | LABEL>>
+<<open: APP>>             <<web: SITE>>            <<lock>>
+<<volume: N|up|down|mute>>  <<media: play|pause|next|previous>>
+<<screenshot>>            <<find: FILENAME>>
 
 If nothing was actually promised, reply with exactly: NONE
 
@@ -438,6 +458,9 @@ def apply_action(raw, agenda, timer):
         return "timer cancelled" if timer and timer.stop() else None
 
     if ":" not in body:
+        # <<lock>> and <<screenshot>> take no argument at all.
+        if body.lower() in system_mod.ACTIONS:
+            return system_mod.run(body.lower())
         return None
     verb, rest = body.split(":", 1)
     verb, rest = verb.strip().lower(), rest.strip()
@@ -468,6 +491,8 @@ def apply_action(raw, agenda, timer):
         h = agenda.tick_habit(part)
         return ("habit ticked: %s (streak %d)" % (h["text"], h.get("streak", 0))
                 if h else "no habit matching %r" % part)
+    if verb in system_mod.ACTIONS:
+        return system_mod.run(verb, part or None)
     if verb == "timer" and timer is not None:
         mins = spoken_number(part)
         if mins is None:
@@ -826,6 +851,13 @@ def main():
                         msg = apply_action(payload, agenda, timer)
                         if msg:
                             log("action: %s" % msg)
+                        # Most actions match what was already said out loud -
+                        # "Opening Chrome" needs no echo. A lookup is
+                        # different: its result IS the answer, and nobody
+                        # reads the log.
+                        if msg and payload.strip().lower().startswith("find") \
+                                and speaker is not None:
+                            speaker.say(msg)
                     except Exception as e:
                         log("action failed (%r): %s" % (payload, e))
                 elif kind == "say":

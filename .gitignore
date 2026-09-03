@@ -11,3 +11,4 @@ wake/*.tflite
 agenda.json
 agenda.json.tmp
 art/
+shots/
