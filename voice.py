@@ -24,6 +24,7 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 
 import numpy as np
@@ -390,6 +391,13 @@ def _find_wake_model():
     return None
 
 
+# A live microphone always carries a noise floor. A run of EXACT zeros is
+# never a quiet room - it is a stream that is no longer connected to anything.
+DEAD_SECONDS = 3.0
+DEAD_BLOCKS = int(DEAD_SECONDS * SAMPLE_RATE / BLOCKSIZE)
+REOPEN_EVERY = 5.0           # never thrash the driver faster than this
+
+
 def input_device(name_part="respeaker", api="WASAPI"):
     for i, d in enumerate(sd.query_devices()):
         a = sd.query_hostapis(d["hostapi"])["name"]
@@ -404,9 +412,16 @@ class Listener:
 
     def __init__(self, device="respeaker", samplerate=SAMPLE_RATE,
                  blocksize=BLOCKSIZE):
+        # Keep the NAME, not just the index. Indices are positions in a
+        # list that Windows reorders whenever a virtual audio device comes or
+        # goes, so an index cached at startup can stop meaning this device.
+        self.device_name = device if isinstance(device, str) else None
         if isinstance(device, str):
             device = input_device(device)
         self.device = device
+        self._dead = 0
+        self._last_reopen = 0.0
+        self._reopens = 0
         self.level = 0.0
         self.speaking = False
         self.wake = None            # attach a WakeWord to gate on a phrase
@@ -431,6 +446,10 @@ class Listener:
 
     def _callback(self, indata, frames, time_info, status):
         block = indata[:, 0].copy()
+        # Watch for the stream going dead. Only while unmuted: we deliberately
+        # zero the input while speaking, and that is not a fault.
+        if not self.muted:
+            self._dead = 0 if np.abs(block).max() > 0.0 else self._dead + 1
         if self.wake is not None and not self.muted:
             self.wake.feed(block)
         rms = float(np.sqrt(np.mean(block ** 2)))
@@ -495,6 +514,46 @@ class Listener:
                 with self._ulock:
                     self._ready = np.concatenate(self._utt)
                 self._utt = []
+
+    def healthy(self):
+        """False once the stream has delivered nothing but exact zeros for
+        DEAD_SECONDS. Checked from the main loop rather than acted on in the
+        audio callback, because reopening a stream from inside its own
+        callback deadlocks."""
+        return self._dead < DEAD_BLOCKS
+
+    def reopen(self):
+        """Find the device again by name and restart the stream.
+
+        Returns True if it actually reopened. Rate-limited: a genuinely
+        unplugged microphone would otherwise be reopened sixty times a second
+        for as long as the program runs.
+        """
+        now = time.time()
+        if now - self._last_reopen < REOPEN_EVERY:
+            return False
+        self._last_reopen = now
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:
+            pass
+        idx = self.device
+        if self.device_name:
+            found = input_device(self.device_name)
+            if found is not None:
+                idx = found
+        try:
+            self.stream = sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                blocksize=BLOCKSIZE, device=idx, callback=self._callback)
+            self.stream.start()
+        except Exception:
+            return False
+        self.device = idx
+        self._dead = 0
+        self._reopens += 1
+        return True
 
     def press(self):
         """Push-to-talk pressed: discard anything in flight and capture from

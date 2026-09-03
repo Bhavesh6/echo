@@ -761,6 +761,14 @@ def main():
             demo_on = False
         awake = (wake is None) or (not wake_gate) or (now < awake_until)
 
+        # The microphone can go silently dead when Windows renumbers the
+        # audio devices under it. Nothing raises; the stream just stops
+        # carrying anything, so it has to be noticed rather than caught.
+        if listener is not None and not listener.healthy():
+            if listener.reopen():
+                log("microphone had gone silent - reopened it on device %s"
+                    % listener.device)
+
         talking = speaker is not None and speaker.busy
         if talking:
             last_talking = now
