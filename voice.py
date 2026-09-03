@@ -476,12 +476,65 @@ DEAD_BLOCKS = int(DEAD_SECONDS * SAMPLE_RATE / BLOCKSIZE)
 REOPEN_EVERY = 5.0           # never thrash the driver faster than this
 
 
-def input_device(name_part="respeaker", api="WASAPI"):
+# Preference order when several work. WASAPI is the device's native path and
+# the lowest latency; MME is the oldest and most forgiving, and is the one
+# still standing when the others have died.
+API_ORDER = ("Windows WASAPI", "MME", "Windows DirectSound", "Windows WDM-KS")
+
+
+def _candidates(name_part):
+    found = []
     for i, d in enumerate(sd.query_devices()):
-        a = sd.query_hostapis(d["hostapi"])["name"]
-        if name_part and name_part.lower() in d["name"].lower()                 and api in a and d["max_input_channels"] > 0:
+        if d["max_input_channels"] <= 0:
+            continue
+        if name_part and name_part.lower() not in d["name"].lower():
+            continue
+        api = sd.query_hostapis(d["hostapi"])["name"]
+        rank = API_ORDER.index(api) if api in API_ORDER else len(API_ORDER)
+        found.append((rank, i, api))
+    return [(i, api) for _r, i, api in sorted(found)]
+
+
+def probe(index, seconds=0.35, samplerate=SAMPLE_RATE):
+    """True if this endpoint actually delivers audio.
+
+    A live microphone always carries a noise floor, even in a silent room -
+    measured at 0.00003 here. A dead endpoint returns exact zeros, opens
+    without error, and reports no fault of any kind, so listening to it is
+    the only way to tell the two apart.
+    """
+    try:
+        st = sd.InputStream(samplerate=samplerate, channels=1,
+                            dtype="float32", blocksize=1600, device=index)
+        st.start()
+        try:
+            for _ in range(max(1, int(seconds / 0.1))):
+                blk, _over = st.read(1600)
+                if float(np.abs(blk).max()) > 0.0:
+                    return True
+        finally:
+            st.stop()
+            st.close()
+    except Exception:
+        return False
+    return False
+
+
+def input_device(name_part="respeaker", api=None):
+    """The best endpoint for this microphone that is actually working.
+
+    `api` forces one by name, for debugging. Otherwise every candidate is
+    tried in preference order and the first live one wins - which is what
+    stops a dead WASAPI endpoint being reopened forever while MME sits there
+    working perfectly.
+    """
+    cands = _candidates(name_part)
+    if api:
+        cands = [(i, a) for i, a in cands if api in a]
+    for i, _a in cands:
+        if probe(i):
             return i
-    return None
+    return cands[0][0] if cands else None
 
 
 class Listener:
@@ -500,6 +553,7 @@ class Listener:
         self._dead = 0
         self._last_reopen = 0.0
         self._reopens = 0
+        self._fails = 0
         self.level = 0.0
         self.speaking = False
         self.wake = None            # attach a WakeWord to gate on a phrase
@@ -608,7 +662,11 @@ class Listener:
         for as long as the program runs.
         """
         now = time.time()
-        if now - self._last_reopen < REOPEN_EVERY:
+        # Back off when reopening is not helping. Nineteen identical lines in
+        # one session said the same nothing; a failure that repeats is worth
+        # saying once and then rarely.
+        wait = REOPEN_EVERY * min(12, 2 ** max(0, self._fails))
+        if now - self._last_reopen < wait:
             return False
         self._last_reopen = now
         try:
@@ -616,6 +674,8 @@ class Listener:
             self.stream.close()
         except Exception:
             pass
+        # Re-probe rather than reusing the last index: the endpoint that
+        # just died is exactly the one not to go back to.
         idx = self.device
         if self.device_name:
             found = input_device(self.device_name)
@@ -631,6 +691,7 @@ class Listener:
         self.device = idx
         self._dead = 0
         self._reopens += 1
+        self._fails = 0 if probe(idx, 0.2) else self._fails + 1
         return True
 
     def press(self):
